@@ -127,7 +127,7 @@ void sigmoidFocalLossForwardMLUKernelLauncher(
   auto core_dim = getDeviceAttr(cnrtAttrMcorePerCluster);
 
   // get compute queue
-  auto queue = getStreamNative<CambDevice>(ctx.getStream());
+  auto queue = ctx.getStream().native();
   auto weight_ptr = weight.size() > 0 ? weight.data() : nullptr;
   // get dtype of input
   cnrtDataType_t d_type = getCnrtDataType(input.elemType());
@@ -316,7 +316,7 @@ void SigmoidFocalLossBackwardMLUKernelLauncher(
   policyFunc(&k_dim, &k_type);
 
   // get compute queue
-  auto queue = getStreamNative<CambDevice>(ctx.getStream());
+  auto queue = ctx.getStream().native();
 
   // get ptr of tensors
   auto weight_ptr = has_weight ? weight.data() : nullptr;

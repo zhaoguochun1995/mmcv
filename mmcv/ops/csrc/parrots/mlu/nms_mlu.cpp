@@ -11,8 +11,8 @@ void nms_parrots(T& ctx, const SSElement& attr,
 #define USE_CPU_NMS
 
 #ifdef USE_CPU_NMS
-
 using at::Tensor;
+
 Tensor nms_cpu(Tensor boxes, Tensor scores, float iou_threshold, int offset);
 
 template <>
@@ -37,7 +37,6 @@ void nms_parrots<HostContext>(HostContext& ctx, const SSElement& attr,
 #endif  // USE_CPU_NMS
 
 #ifdef PARROTS_USE_CAMB
-
 void KernelNms(cnrtDim3_t k_dim, cnrtFunctionType_t k_type, cnrtQueue_t queue,
                const cnrtDataType_t data_type_input, const void* boxes_ptr,
                const void* scores_ptr, const int input_num_boxes,
@@ -92,7 +91,7 @@ void NMSMLUKernelLauncher(CambContext& ctx, const DArrayLite& boxes,
   auto workspace = ctx.createDArrayLite(DArraySpec::bytes(space_size));
 
   // get compute queue
-  auto queue = getStreamNative<CambDevice>(ctx.getStream());
+  auto queue = ctx.getStream().native();
 
   switch (k_type) {
     default: {

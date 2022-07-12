@@ -8,9 +8,11 @@ from mmcv.utils import IS_CUDA_AVAILABLE, IS_MLU_AVAILABLE
 _USING_PARROTS = True
 try:
     from parrots.autograd import gradcheck
+    from parrots.base import use_camb as parrots_use_camb
 except ImportError:
     from torch.autograd import gradcheck
     _USING_PARROTS = False
+    parrots_use_camb = False
 
 # yapf:disable
 
@@ -57,7 +59,7 @@ def _test_roialign_gradcheck(device, dtype):
         rois = torch.tensor(np_rois, dtype=dtype, device=device)
 
         froipool = RoIAlign((pool_h, pool_w), spatial_scale, sampling_ratio)
-
+        print("froipool:",froipool)
         if torch.__version__ == 'parrots':
             gradcheck(
                 froipool, (x, rois), no_grads=[rois], delta=1e-5, pt_atol=1e-5)
@@ -109,7 +111,7 @@ def _test_roialign_allclose(device, dtype):
     pytest.param(
         torch.double,
         marks=pytest.mark.skipif(
-            IS_MLU_AVAILABLE,
+            IS_MLU_AVAILABLE or parrots_use_camb,
             reason='MLU does not support for 64-bit floating point')),
     torch.half
 ])

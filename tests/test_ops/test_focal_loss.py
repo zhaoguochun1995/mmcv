@@ -69,7 +69,7 @@ class Testfocalloss:
             np_y = np.array(case[1])
             np_x_grad = np.array(output[1])
 
-            x = torch.from_numpy(np_x).to(device).type(dtype)
+            x = torch.from_numpy(np_x).type(dtype).to(device)
             x.requires_grad_()
             y = torch.from_numpy(np_y).to(device).long()
 
@@ -89,7 +89,7 @@ class Testfocalloss:
             np_x = np.array(case[0])
             np_y = np.array(case[1])
 
-            x = torch.from_numpy(np_x).cuda().type(dtype)
+            x = torch.from_numpy(np_x).type(dtype).cuda()
             x.requires_grad_()
             y = torch.from_numpy(np_y).cuda().long()
 
@@ -111,7 +111,7 @@ class Testfocalloss:
             np_x = np.array(case[0])
             np_y = np.array(case[1])
 
-            x = torch.from_numpy(np_x).cuda().type(dtype)
+            x = torch.from_numpy(np_x).type(dtype).cuda()
             x.requires_grad_()
             y = torch.from_numpy(np_y).cuda().long()
 

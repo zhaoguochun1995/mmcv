@@ -7,22 +7,7 @@
 
 #include <cnrt.h>
 
-#ifdef __BANG_ARCH__
-#define MAX_NRAM_SIZE \
-  (__MLU_NRAM_SIZE__ * 1024 - REM_FOR_STACK)  // 128KB reserved for cncc
-#define MAX_SRAM_SIZE \
-  (__MLU_SRAM_SIZE__ * 1024 - REM_FOR_STACK)  // 128KB reserved for cncc
-#else
-#define MAX_NRAM_SIZE (384 * 1024)   // 384KB,  initialization value
-#define MAX_SRAM_SIZE (1920 * 1024)  // 1920KB, initialization value
-#endif
-
-
-#define NFU_ALIGN_SIZE 128
-#define PAD_UP(x, y) (((x) / (y) + (int)((x) % (y) > 0)) * (y))
-#define PAD_DOWN(x, y) (((x) / (y)) * (y))
-#define CEIL_ALIGN(x, y) (((x) + (y)-1) / (y) * (y))
-
+#include "common_mlu_helper.hpp"
 
 using parrots::DArrayLite;
 using parrots::Prim;

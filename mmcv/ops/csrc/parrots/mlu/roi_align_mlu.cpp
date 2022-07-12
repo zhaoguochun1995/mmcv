@@ -150,7 +150,7 @@ void ROIAlignForwardMLUKernelLauncher(CambContext& ctx, const DArrayLite& input,
     output_ptr = &output_tmp;
   }
 
-  auto queue = getStreamNative<CambDevice>(ctx.getStream());
+  auto queue = ctx.getStream().native();
 
   cnrtDim3_t k_dim;
   cnrtJobType_t k_type = CNRT_FUNC_TYPE_UNION1;
@@ -163,11 +163,9 @@ void ROIAlignForwardMLUKernelLauncher(CambContext& ctx, const DArrayLite& input,
                  rois.data(), channels, aligned, aligned_height, aligned_width,
                  height, width, sampling_ratio, spatial_scale, num_rois,
                  (void*)output_ptr->data());
-#if 1
   if (output_tmp.size() > 0) {
     copy(ctx, output, output_tmp);
   }
-#endif
 }
 
 void roi_align_forward_camb_parrots(CambContext& ctx, const SSElement& attr,
@@ -273,7 +271,7 @@ void ROIAlignBackwardMLUKernelLauncher(
   dim_y = (dim_y > union_number) ? union_number : dim_y;
   cnrtDim3_t k_dim = {dim_x, dim_y, 1};
   cnrtDataType_t k_dtype = getCnrtDataType(grad.elemType());
-  auto queue = getStreamNative<CambDevice>(ctx.getStream());
+  auto queue = ctx.getStream().native();
 
   KernelRoiAlignBackward(
       k_dim, k_type, queue, k_dtype, const_cast<void*>(grad_ptr->data()),
@@ -292,7 +290,7 @@ void ROIAlignBackwardMLUKernelLauncher(
   }
 }
 
-void roi_align_backward_camb_parrots(CambContext& ctx, const SSElement& attr,
+void roi_align_backward_camb_parrots(DeviceContext& ctx, const SSElement& attr,
                                      const OperatorBase::in_list_t& ins,
                                      OperatorBase::out_list_t& outs) {
   int aligned_height;
@@ -335,9 +333,7 @@ PARROTS_EXTENSION_REGISTER(roi_align_forward)
 #ifdef USE_CPU_ROI_ALIGN
     .apply(roi_align_forward_cpu_parrots)
 #endif
-#ifdef PARROTS_USE_CAMB
     .apply(roi_align_forward::roi_align_forward_camb_parrots)
-#endif
     .done();
 
 PARROTS_EXTENSION_REGISTER(roi_align_backward)
@@ -352,7 +348,5 @@ PARROTS_EXTENSION_REGISTER(roi_align_backward)
 #ifdef USE_CPU_ROI_ALIGN
     .apply(roi_align_backward_cpu_parrots)
 #endif
-#ifdef PARROTS_USE_CAMB
     .apply(roi_align_backward::roi_align_backward_camb_parrots)
-#endif
     .done();
