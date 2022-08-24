@@ -1,0 +1,335 @@
+// Copyright (c) OpenMMLab. All rights reserved
+#include <parrots/compute/aten.hpp>
+#include <parrots/extension.hpp>
+#include <parrots/foundation/ssattrs.hpp>
+#include <parrots/darray/darraymath.hpp>
+
+#include "modulated_deform_conv_pytorch.h"
+#include "parrots_mlu_helper.hpp"
+
+using namespace parrots;
+
+void modulated_deformable_im2col_camb(
+    cnrtDim3_t k_dim, cnrtFunctionType_t k_type, cnrtQueue_t queue, const cnrtDataType_t d_type,
+    const void* data_im, const void* data_offset, const void* data_mask,
+    const int batch_size, const int channels, const int height_im,
+    const int width_im, const int height_col, const int width_col,
+    const int kernel_h, const int kernel_w, const int pad_h, const int pad_w,
+    const int stride_h, const int stride_w, const int dilation_h,
+    const int dilation_w, const int deformable_group, void* data_col);
+
+
+void modulated_deform_conv_forward_cpu_parrots(
+        HostContext& ctx, const SSElement& attr, const OperatorBase::in_list_t& ins,
+        OperatorBase::out_list_t& outs) {
+    int kernel_h, kernel_w, stride_h, stride_w, pad_h, pad_w, dilation_h,
+        dilation_w, group, deformable_group, with_bias;
+    SSAttrs(attr)
+        .get<int>("kernel_h", kernel_h)
+        .get<int>("kernel_w", kernel_w)
+        .get<int>("stride_h", stride_h)
+        .get<int>("stride_w", stride_w)
+        .get<int>("pad_h", pad_h)
+        .get<int>("pad_w", pad_w)
+        .get<int>("dilation_h", dilation_h)
+        .get<int>("dilation_w", dilation_w)
+        .get<int>("group", group)
+        .get<int>("deformable_group", deformable_group)
+        .get<int>("with_bias", with_bias)
+        .done();
+
+    const auto& input = buildATensor(ctx, ins[0]);
+    const auto& weight = buildATensor(ctx, ins[1]);
+    const auto& bias = buildATensor(ctx, ins[2]);
+    const auto& ones = buildATensor(ctx, ins[3]);
+    const auto& offset = buildATensor(ctx, ins[4]);
+    const auto& mask = buildATensor(ctx, ins[5]);
+
+    auto output = buildATensor(ctx, outs[0]);
+    auto columns = buildATensor(ctx, outs[1]);
+
+    modulated_deform_conv_forward(input, weight, bias, ones, offset, mask, output,
+                                    columns, kernel_h, kernel_w, stride_h, stride_w,
+                                    pad_h, pad_w, dilation_h, dilation_w, group,
+                                    deformable_group, with_bias);
+}
+
+void modulated_deform_conv_backward_cpu_parrots(
+        HostContext& ctx, const SSElement& attr, const OperatorBase::in_list_t& ins,
+        OperatorBase::out_list_t& outs) {
+    int kernel_h, kernel_w, stride_h, stride_w, pad_h, pad_w, dilation_h,
+        dilation_w, group, deformable_group, with_bias;
+    SSAttrs(attr)
+        .get<int>("kernel_h", kernel_h)
+        .get<int>("kernel_w", kernel_w)
+        .get<int>("stride_h", stride_h)
+        .get<int>("stride_w", stride_w)
+        .get<int>("pad_h", pad_h)
+        .get<int>("pad_w", pad_w)
+        .get<int>("dilation_h", dilation_h)
+        .get<int>("dilation_w", dilation_w)
+        .get<int>("group", group)
+        .get<int>("deformable_group", deformable_group)
+        .get<int>("with_bias", with_bias)
+        .done();
+
+    const auto& input = buildATensor(ctx, ins[0]);
+    const auto& weight = buildATensor(ctx, ins[1]);
+    const auto& bias = buildATensor(ctx, ins[2]);
+    const auto& ones = buildATensor(ctx, ins[3]);
+    const auto& offset = buildATensor(ctx, ins[4]);
+    const auto& mask = buildATensor(ctx, ins[5]);
+
+    auto columns = buildATensor(ctx, outs[0]);
+    auto grad_input = buildATensor(ctx, outs[1]);
+    auto grad_weight = buildATensor(ctx, outs[2]);
+    auto grad_bias = buildATensor(ctx, outs[3]);
+    auto grad_offset = buildATensor(ctx, outs[4]);
+    auto grad_mask = buildATensor(ctx, outs[5]);
+    auto grad_output = buildATensor(ctx, outs[6]);
+    modulated_deform_conv_backward(
+        input, weight, bias, ones, offset, mask, columns, grad_input, grad_weight,
+        grad_bias, grad_offset, grad_mask, grad_output, kernel_h, kernel_w,
+        stride_h, stride_w, pad_h, pad_w, dilation_h, dilation_w, group,
+        deformable_group, with_bias);
+}
+
+#ifdef PARROTS_USE_CAMB
+
+void modulated_deform_conv_forward_camb_parrots(
+        CambContext& ctx, const SSElement& attr, const OperatorBase::in_list_t& ins,
+        OperatorBase::out_list_t& outs) {
+    int kernel_h, kernel_w, stride_h, stride_w, pad_h, pad_w, dilation_h,
+        dilation_w, group, deformable_group, with_bias;
+    SSAttrs(attr)
+        .get<int>("kernel_h", kernel_h)
+        .get<int>("kernel_w", kernel_w)
+        .get<int>("stride_h", stride_h)
+        .get<int>("stride_w", stride_w)
+        .get<int>("pad_h", pad_h)
+        .get<int>("pad_w", pad_w)
+        .get<int>("dilation_h", dilation_h)
+        .get<int>("dilation_w", dilation_w)
+        .get<int>("group", group)
+        .get<int>("deformable_group", deformable_group)
+        .get<int>("with_bias", with_bias)
+        .done();
+
+    DArrayLite input = ins[0];
+    DArrayLite weight = ins[1];
+    DArrayLite bias = ins[2];
+    DArrayLite ones = ins[3];
+    DArrayLite offset = ins[4];
+    DArrayLite mask = ins[5];
+
+    DArrayLite& output = outs[0];
+    DArrayLite& columns = outs[1];
+
+    const int batch = input.dim(0);
+    const int channels = input.dim(1);
+    const int height = input.dim(2);
+    const int width = input.dim(3);
+
+    const int channels_out = weight.dim(0);
+    const int channels_kernel = weight.dim(1);
+    const int kernel_h_ = weight.dim(2);
+    const int kernel_w_ = weight.dim(3);
+
+    if (kernel_h_ != kernel_h || kernel_w_ != kernel_w)
+        AT_ERROR("Input shape and kernel shape won't match: (%d x %d vs %d x %d).",
+                kernel_h_, kernel_w, kernel_h_, kernel_w_);
+    if (channels != channels_kernel * group)
+        AT_ERROR("Input shape and kernel channels won't match: (%d vs %d).",
+                channels, channels_kernel * group);
+
+    const int height_out =
+        (height + 2 * pad_h - (dilation_h * (kernel_h - 1) + 1)) / stride_h + 1;
+    const int width_out =
+        (width + 2 * pad_w - (dilation_w * (kernel_w - 1) + 1)) / stride_w + 1;
+
+    if (ones.ndims() != 2 ||
+        ones.dim(0) * ones.dim(1) < height_out * width_out) {
+        // Resize plane and fill with ones...
+        ones = ctx.createDArrayLite(input.elemType(),
+                                    DArrayShape(height_out, width_out));
+        fill(ctx, ones, 1);
+    }
+
+    // resize output
+    output = output.view({batch, channels_out, height_out, width_out});
+    fill(ctx, output, 0);
+
+    columns = ctx.createDArrayLite(input.elemType(),
+                                   DArrayShape(channels * kernel_h * kernel_w, 1 * height_out * width_out));
+    fill(ctx, columns, 0);
+
+    output = output.view({output.dim(0), group, output.dim(1) / group,
+                            output.dim(2), output.dim(3)});
+
+    for (int b = 0; b < batch; b++) {
+        const int num_kernels = channels * 1 * height_out * width_out;
+        cnrtDim3_t k_dim = {getDeviceAttr(cnrtAttrMcorePerCluster), getDeviceAttr(cnrtAttrClusterCount), 1};
+        cnrtFunctionType_t k_type = CNRT_FUNC_TYPE_UNION1;
+        auto queue = ctx.getStream().native();
+        cnrtDataType_t d_type = getCnrtDataType(input.elemType());
+
+        // launch kernel
+        modulated_deformable_im2col_camb(
+            k_dim, k_type, queue, d_type,
+            input[b].data(), offset[b].data(), mask[b].data(),
+            1, channels, height,
+            width, height_out, width_out,
+            kernel_h, kernel_w, pad_h, pad_w,
+            stride_h, stride_w, dilation_h,
+            dilation_w, deformable_group, columns.data());
+
+        // divide into group
+        weight = weight.view({group, weight.dim(0) / group, weight.dim(1),
+                              weight.dim(2), weight.dim(3)});
+        columns = columns.view({group, columns.dim(0) / group, columns.dim(1)});
+
+        for (int g = 0; g < group; g++) {
+            DArrayLite outputBG = output[b][g].view({output[b][g].dim(0), output[b][g].size() / output[b][g].dim(0)});
+            DArrayLite weightG = weight[g].view({weight[g].dim(0), weight[g].size() / weight[g].dim(0)});
+            DArrayLite matOut = ctx.createDArrayLite(input.elemType(), DArrayShape(weightG.dim(0), columns[g].dim(1)));
+            fill(ctx, matOut, 0);
+            gemm(ctx, 1.0, false, weightG, false, columns[g], 0.0, matOut);
+            add(ctx, outputBG, matOut, outputBG);
+        }
+
+        weight = weight.view({weight.dim(0) * weight.dim(1), weight.dim(2),
+                              weight.dim(3), weight.dim(4)});
+        columns = columns.view({columns.dim(0) * columns.dim(1), columns.dim(2)});
+    }
+    output = output.view({output.dim(0), output.dim(1) * output.dim(2),
+                          output.dim(3), output.dim(4)});
+    if (with_bias) {
+        add(ctx, output, bias.view({1, bias.dim(0), 1, 1}), output);
+    }
+}
+
+void modulated_deform_conv_backward_camb_parrots(
+        CambContext& ctx, const SSElement& attr, const OperatorBase::in_list_t& ins,
+        OperatorBase::out_list_t& outs) {
+    int kernel_h, kernel_w, stride_h, stride_w, pad_h, pad_w, dilation_h,
+        dilation_w, group, deformable_group, with_bias;
+    SSAttrs(attr)
+        .get<int>("kernel_h", kernel_h)
+        .get<int>("kernel_w", kernel_w)
+        .get<int>("stride_h", stride_h)
+        .get<int>("stride_w", stride_w)
+        .get<int>("pad_h", pad_h)
+        .get<int>("pad_w", pad_w)
+        .get<int>("dilation_h", dilation_h)
+        .get<int>("dilation_w", dilation_w)
+        .get<int>("group", group)
+        .get<int>("deformable_group", deformable_group)
+        .get<int>("with_bias", with_bias)
+        .done();
+
+    DArrayLite input = ins[0];
+    DArrayLite weight = ins[1];
+    DArrayLite bias = ins[2];
+    DArrayLite ones = ins[3];
+    DArrayLite offset = ins[4];
+    DArrayLite mask = ins[5];
+
+    DArrayLite& columns = outs[0];
+    DArrayLite& grad_input = outs[1];
+    DArrayLite& grad_weight = outs[2];
+    DArrayLite& grad_bias = outs[3];
+    DArrayLite& grad_offset = outs[4];
+    DArrayLite& grad_mask = outs[5];
+    DArrayLite& grad_output = outs[6];
+
+    const int batch = input.dim(0);
+    const int channels = input.dim(1);
+    const int height = input.dim(2);
+    const int width = input.dim(3);
+
+    const int channels_out = weight.dim(0);
+    const int channels_kernel = weight.dim(1);
+    const int kernel_h_ = weight.dim(2);
+    const int kernel_w_ = weight.dim(3);
+
+    if (kernel_h_ != kernel_h || kernel_w_ != kernel_w)
+        AT_ERROR("Input shape and kernel shape won't match: (%d x %d vs %d x %d).",
+                kernel_h_, kernel_w, kernel_h_, kernel_w_);
+    if (channels != channels_kernel * group)
+        AT_ERROR("Input shape and kernel channels won't match: (%d vs %d).",
+                channels, channels_kernel * group);
+
+    const int height_out =
+        (height + 2 * pad_h - (dilation_h * (kernel_h - 1) + 1)) / stride_h + 1;
+    const int width_out =
+        (width + 2 * pad_w - (dilation_w * (kernel_w - 1) + 1)) / stride_w + 1;
+
+    // modulated_deform_conv_backward(
+    //     input, weight, bias, ones, offset, mask, columns, grad_input, grad_weight,
+    //     grad_bias, grad_offset, grad_mask, grad_output, kernel_h, kernel_w,
+    //     stride_h, stride_w, pad_h, pad_w, dilation_h, dilation_w, group,
+    //     deformable_group, with_bias);
+}
+
+#endif  // PARROTS_USE_CAMB
+
+void modulated_deform_conv_forward_parrots(
+        HostContext& ctx, const SSElement& attr, const OperatorBase::in_list_t& ins,
+        OperatorBase::out_list_t& outs) {
+    if (ctx.getProxy().isHost()) {
+        modulated_deform_conv_forward_cpu_parrots(ctx, attr, ins, outs);
+    } else {
+#ifdef PARROTS_USE_CAMB
+        modulated_deform_conv_forward_camb_parrots(ctx, attr, ins, outs);
+#endif
+    }
+}
+
+void modulated_deform_conv_backward_parrots(
+        HostContext& ctx, const SSElement& attr, const OperatorBase::in_list_t& ins,
+        OperatorBase::out_list_t& outs) {
+    if (ctx.getProxy().isHost()) {
+        modulated_deform_conv_backward_cpu_parrots(ctx, attr, ins, outs);
+    } else {
+#ifdef PARROTS_USE_CAMB
+        modulated_deform_conv_backward_camb_parrots(ctx, attr, ins, outs);
+#endif
+    }
+}
+
+
+PARROTS_EXTENSION_REGISTER(modulated_deform_conv_forward)
+    .attr("kernel_h")
+    .attr("kernel_w")
+    .attr("stride_h")
+    .attr("stride_w")
+    .attr("pad_h")
+    .attr("pad_w")
+    .attr("dilation_h")
+    .attr("dilation_w")
+    .attr("group")
+    .attr("deformable_group")
+    .attr("with_bias")
+    .input(6)
+    .output(2)
+    .apply(modulated_deform_conv_forward_parrots)
+    .done();
+
+PARROTS_EXTENSION_REGISTER(modulated_deform_conv_backward)
+    .attr("kernel_h")
+    .attr("kernel_w")
+    .attr("stride_h")
+    .attr("stride_w")
+    .attr("pad_h")
+    .attr("pad_w")
+    .attr("dilation_h")
+    .attr("dilation_w")
+    .attr("group")
+    .attr("deformable_group")
+    .attr("with_bias")
+    .input(6)
+    .output(7)
+    .apply(modulated_deform_conv_backward_parrots)
+    .done();
+
+
