@@ -4,15 +4,16 @@
 #include <parrots/foundation/ssattrs.hpp>
 #include <parrots/darray/darraymath.hpp>
 
-#define USE_CNNL 0
-#if USE_CNNL
+#ifdef PARROTS_USE_CAMB
+
 #include <parrots/compute/cnnldescriptor.hpp>
 #include <parrots/compute/cnnlhandle.hpp>
 #include <parrots/compute/cnnlquantize.hpp>
-#endif
 
 #include "modulated_deform_conv_pytorch.h"
 #include "parrots_mlu_helper.hpp"
+
+#endif
 
 using namespace parrots;
 
@@ -103,8 +104,6 @@ void modulated_deform_conv_backward_cpu_parrots(
 
 #ifdef PARROTS_USE_CAMB
 
-#if USE_CNNL
-
 static void cambTransposeTo(ContextBase& ctx, const DArrayLite& in, DArrayLite& out, cnnlTensorLayout_t layoutIn,
                             cnnlTensorLayout_t layoutOut) {
     CnnlHandle& handle = CnnlHandle::get(ctx);
@@ -132,8 +131,6 @@ static void cambTransposeTo(ContextBase& ctx, const DArrayLite& in, DArrayLite& 
     PARROTS_CALLCNNL(
         cnnlTranspose(handle.native(), transDesc.get(), inDesc.get(), in.data(), outDesc.get(), out.data()));
 }
-
-#endif
 
 void modulated_deform_conv_forward_camb_parrots(
         CambContext& ctx, const SSElement& attr, const OperatorBase::in_list_t& ins,
@@ -202,112 +199,113 @@ void modulated_deform_conv_forward_camb_parrots(
                                    DArrayShape(channels * kernel_h * kernel_w, 1 * height_out * width_out));
     fill(ctx, columns, 0);
 
-#if USE_CNNL
-    std::vector<int> padding_t(4);
-    std::vector<int> stride_t(2);
-    std::vector<int> dilation_t(2);
-    padding_t[0] = pad_h;
-    padding_t[1] = pad_w;
-    padding_t[3] = pad_h;
-    padding_t[4] = pad_w;
-    stride_t[0] = stride_h;
-    stride_t[1] = stride_w;
-    dilation_t[0] = dilation_h;
-    dilation_t[1] = dilation_w;
-    int im2col_step = 1;
+    if (output.dim(2) == offset.dim(2) && output.dim(3) == offset.dim(3)) {
+        std::vector<int> padding_t(4);
+        std::vector<int> stride_t(2);
+        std::vector<int> dilation_t(2);
+        padding_t[0] = pad_h;
+        padding_t[1] = pad_w;
+        padding_t[2] = pad_h;
+        padding_t[3] = pad_w;
+        stride_t[0] = stride_h;
+        stride_t[1] = stride_w;
+        dilation_t[0] = dilation_h;
+        dilation_t[1] = dilation_w;
+        int im2col_step = 1;
 
-    DArrayLite inputTemp, offsetTemp, maskTemp, weightTemp, outputTemp;
-    inputTemp = ctx.createDArrayLite(input.spec().duplicate(parrots::MemoryFormat::ChannelsLast));
-    offsetTemp = ctx.createDArrayLite(offset.spec().duplicate(parrots::MemoryFormat::ChannelsLast));
-    maskTemp = ctx.createDArrayLite(mask.spec().duplicate(parrots::MemoryFormat::ChannelsLast));
-    weightTemp = ctx.createDArrayLite(weight.spec().duplicate(parrots::MemoryFormat::ChannelsLast));
-    outputTemp = ctx.createDArrayLite(output.spec().duplicate(parrots::MemoryFormat::ChannelsLast));
-    cambTransposeTo(ctx, input, inputTemp, CNNL_LAYOUT_NCHW, CNNL_LAYOUT_NHWC);
-    cambTransposeTo(ctx, offset, offsetTemp, CNNL_LAYOUT_NCHW, CNNL_LAYOUT_NHWC);
-    cambTransposeTo(ctx, mask, maskTemp, CNNL_LAYOUT_NCHW, CNNL_LAYOUT_NHWC);
-    cambTransposeTo(ctx, weight, weightTemp, CNNL_LAYOUT_NCHW, CNNL_LAYOUT_NHWC);
-    cambTransposeTo(ctx, output, outputTemp, CNNL_LAYOUT_NCHW, CNNL_LAYOUT_NHWC);
+        DArrayLite inputTemp, offsetTemp, maskTemp, weightTemp, outputTemp;
+        inputTemp = ctx.createDArrayLite(input.spec().duplicate(parrots::MemoryFormat::ChannelsLast));
+        offsetTemp = ctx.createDArrayLite(offset.spec().duplicate(parrots::MemoryFormat::ChannelsLast));
+        maskTemp = ctx.createDArrayLite(mask.spec().duplicate(parrots::MemoryFormat::ChannelsLast));
+        weightTemp = ctx.createDArrayLite(weight.spec().duplicate(parrots::MemoryFormat::ChannelsLast));
+        outputTemp = ctx.createDArrayLite(output.spec().duplicate(parrots::MemoryFormat::ChannelsLast));
+        cambTransposeTo(ctx, input, inputTemp, CNNL_LAYOUT_NCHW, CNNL_LAYOUT_NHWC);
+        cambTransposeTo(ctx, offset, offsetTemp, CNNL_LAYOUT_NCHW, CNNL_LAYOUT_NHWC);
+        cambTransposeTo(ctx, mask, maskTemp, CNNL_LAYOUT_NCHW, CNNL_LAYOUT_NHWC);
+        cambTransposeTo(ctx, weight, weightTemp, CNNL_LAYOUT_NCHW, CNNL_LAYOUT_NHWC);
+        cambTransposeTo(ctx, output, outputTemp, CNNL_LAYOUT_NCHW, CNNL_LAYOUT_NHWC);
 
-    cnnlDCNDescriptor_t dcn_desc;
-    PARROTS_CALLCNNL(cnnlCreateDCNDescriptor(&dcn_desc));
-    PARROTS_CALLCNNL(cnnlSetDCNDescriptor(dcn_desc, inputTemp.ndims(), padding_t.data(), stride_t.data(),
-            dilation_t.data(), deformable_group, group, im2col_step, CNNL_DTYPE_FLOAT));
+        cnnlDCNDescriptor_t dcn_desc;
+        PARROTS_CALLCNNL(cnnlCreateDCNDescriptor(&dcn_desc));
+        PARROTS_CALLCNNL(cnnlSetDCNDescriptor(dcn_desc, inputTemp.ndims(), padding_t.data(), stride_t.data(),
+                dilation_t.data(), deformable_group, group, im2col_step, CNNL_DTYPE_FLOAT));
 
-    CnnlHandle& handle = CnnlHandle::get(ctx);
-    CnnlTensorDesc inputDesc(inputTemp.spec());
-    CnnlTensorDesc offsetDesc(offsetTemp.spec());
-    CnnlTensorDesc maskDesc(maskTemp.spec());
-    CnnlTensorDesc weightDesc(weightTemp.spec());
-    CnnlTensorDesc biasDesc(bias.spec());
-    CnnlTensorDesc outputDesc(outputTemp.spec());
-    size_t workspace_size = 0;
+        CnnlHandle& handle = CnnlHandle::get(ctx);
+        CnnlTensorDesc inputDesc(inputTemp.spec());
+        CnnlTensorDesc offsetDesc(offsetTemp.spec());
+        CnnlTensorDesc maskDesc(maskTemp.spec());
+        CnnlTensorDesc weightDesc(weightTemp.spec());
+        CnnlTensorDesc biasDesc(bias.spec());
+        CnnlTensorDesc outputDesc(outputTemp.spec());
+        size_t workspace_size = 0;
 
-    cnnlDataType_t onChipDataType = getQuantifyDtype(input.elemType());
-    inputDesc.setOnchipDtype(onChipDataType);
-    offsetDesc.setOnchipDtype(onChipDataType);
-    weightDesc.setOnchipDtype(onChipDataType);
-    outputDesc.setOnchipDtype(getCnnlDataType(outputTemp.elemType()));
+        cnnlDataType_t onChipDataType = getQuantifyDtype(input.elemType());
+        inputDesc.setOnchipDtype(onChipDataType);
+        offsetDesc.setOnchipDtype(onChipDataType);
+        weightDesc.setOnchipDtype(onChipDataType);
+        outputDesc.setOnchipDtype(getCnnlDataType(outputTemp.elemType()));
 
 
-    PARROTS_CALLCNNL(cnnlGetDCNForwardWorkspaceSize(handle.native(), dcn_desc, inputDesc.get(), offsetDesc.get(),
-            maskDesc.get(), weightDesc.get(), biasDesc.get(), outputDesc.get(), &workspace_size));
+        PARROTS_CALLCNNL(cnnlGetDCNForwardWorkspaceSize(handle.native(), dcn_desc, inputDesc.get(), offsetDesc.get(),
+                maskDesc.get(), weightDesc.get(), biasDesc.get(), outputDesc.get(), &workspace_size));
 
-    DArrayLite workspace = ctx.createDArrayLite(type_<char>(), DArrayShape(workspace_size));
-    PARROTS_CALLCNNL(cnnlDCNForward(handle.native(), dcn_desc, inputDesc.get(), inputTemp.data(),
-            offsetDesc.get(), offsetTemp.data(), maskDesc.get(), maskTemp.data(), weightDesc.get(),weightTemp.data(),
-            with_bias ? biasDesc.get() : nullptr,
-            with_bias ? bias.data() : nullptr,
-            workspace.data(), workspace_size, outputDesc.get(), outputTemp.data()));
-    PARROTS_CALLCNNL(cnnlDestroyDCNDescriptor(dcn_desc));
+        DArrayLite workspace = ctx.createDArrayLite(type_<char>(), DArrayShape(workspace_size));
+        PARROTS_CALLCNNL(cnnlDCNForward(handle.native(), dcn_desc, inputDesc.get(), inputTemp.data(),
+                offsetDesc.get(), offsetTemp.data(), maskDesc.get(), maskTemp.data(), weightDesc.get(),weightTemp.data(),
+                with_bias ? biasDesc.get() : nullptr,
+                with_bias ? bias.data() : nullptr,
+                workspace.data(), workspace_size, outputDesc.get(), outputTemp.data()));
+        PARROTS_CALLCNNL(cnnlDestroyDCNDescriptor(dcn_desc));
 
-    cambTransposeTo(ctx, outputTemp, output, CNNL_LAYOUT_NHWC, CNNL_LAYOUT_NCHW);
+        cambTransposeTo(ctx, outputTemp, output, CNNL_LAYOUT_NHWC, CNNL_LAYOUT_NCHW);
 
-#else
+    } else {
+        output = output.view({output.dim(0), group, output.dim(1) / group,
+                                output.dim(2), output.dim(3)});
 
-    output = output.view({output.dim(0), group, output.dim(1) / group,
-                            output.dim(2), output.dim(3)});
+        for (int b = 0; b < batch; b++) {
+            const int num_kernels = channels * 1 * height_out * width_out;
+            cnrtDim3_t k_dim = {getDeviceAttr(cnrtAttrMcorePerCluster), getDeviceAttr(cnrtAttrClusterCount), 1};
+            cnrtFunctionType_t k_type = CNRT_FUNC_TYPE_UNION1;
+            auto queue = ctx.getStream().native();
+            cnrtDataType_t d_type = getCnrtDataType(input.elemType());
 
-    for (int b = 0; b < batch; b++) {
-        const int num_kernels = channels * 1 * height_out * width_out;
-        cnrtDim3_t k_dim = {getDeviceAttr(cnrtAttrMcorePerCluster), getDeviceAttr(cnrtAttrClusterCount), 1};
-        cnrtFunctionType_t k_type = CNRT_FUNC_TYPE_UNION1;
-        auto queue = ctx.getStream().native();
-        cnrtDataType_t d_type = getCnrtDataType(input.elemType());
+            // launch kernel
+            modulated_deformable_im2col_camb(
+                k_dim, k_type, queue, d_type,
+                input[b].data(), offset[b].data(), mask[b].data(),
+                1, channels, height,
+                width, height_out, width_out,
+                kernel_h, kernel_w, pad_h, pad_w,
+                stride_h, stride_w, dilation_h,
+                dilation_w, deformable_group, columns.data());
 
-        // launch kernel
-        modulated_deformable_im2col_camb(
-            k_dim, k_type, queue, d_type,
-            input[b].data(), offset[b].data(), mask[b].data(),
-            1, channels, height,
-            width, height_out, width_out,
-            kernel_h, kernel_w, pad_h, pad_w,
-            stride_h, stride_w, dilation_h,
-            dilation_w, deformable_group, columns.data());
+            // divide into group
+            weight = weight.view({group, weight.dim(0) / group, weight.dim(1),
+                                weight.dim(2), weight.dim(3)});
+            columns = columns.view({group, columns.dim(0) / group, columns.dim(1)});
 
-        // divide into group
-        weight = weight.view({group, weight.dim(0) / group, weight.dim(1),
-                              weight.dim(2), weight.dim(3)});
-        columns = columns.view({group, columns.dim(0) / group, columns.dim(1)});
+            for (int g = 0; g < group; g++) {
+                DArrayLite outputBG = output[b][g].view({output[b][g].dim(0), output[b][g].size() / output[b][g].dim(0)});
+                DArrayLite weightG = weight[g].view({weight[g].dim(0), weight[g].size() / weight[g].dim(0)});
+                DArrayLite matOut = ctx.createDArrayLite(input.elemType(), DArrayShape(weightG.dim(0), columns[g].dim(1)));
+                fill(ctx, matOut, 0);
+                gemm(ctx, 1.0, false, weightG, false, columns[g], 0.0, matOut);
+                add(ctx, outputBG, matOut, outputBG);
+            }
 
-        for (int g = 0; g < group; g++) {
-            DArrayLite outputBG = output[b][g].view({output[b][g].dim(0), output[b][g].size() / output[b][g].dim(0)});
-            DArrayLite weightG = weight[g].view({weight[g].dim(0), weight[g].size() / weight[g].dim(0)});
-            DArrayLite matOut = ctx.createDArrayLite(input.elemType(), DArrayShape(weightG.dim(0), columns[g].dim(1)));
-            fill(ctx, matOut, 0);
-            gemm(ctx, 1.0, false, weightG, false, columns[g], 0.0, matOut);
-            add(ctx, outputBG, matOut, outputBG);
+            weight = weight.view({weight.dim(0) * weight.dim(1), weight.dim(2),
+                                weight.dim(3), weight.dim(4)});
+            columns = columns.view({columns.dim(0) * columns.dim(1), columns.dim(2)});
         }
+        output = output.view({output.dim(0), output.dim(1) * output.dim(2),
+                            output.dim(3), output.dim(4)});
+        if (with_bias) {
+            add(ctx, output, bias.view({1, bias.dim(0), 1, 1}), output);
+        }
+    }
 
-        weight = weight.view({weight.dim(0) * weight.dim(1), weight.dim(2),
-                              weight.dim(3), weight.dim(4)});
-        columns = columns.view({columns.dim(0) * columns.dim(1), columns.dim(2)});
-    }
-    output = output.view({output.dim(0), output.dim(1) * output.dim(2),
-                          output.dim(3), output.dim(4)});
-    if (with_bias) {
-        add(ctx, output, bias.view({1, bias.dim(0), 1, 1}), output);
-    }
-#endif
+
 }
 
 void modulated_deform_conv_backward_camb_parrots(
