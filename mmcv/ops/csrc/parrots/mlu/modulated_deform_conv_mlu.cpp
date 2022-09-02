@@ -4,6 +4,13 @@
 #include <parrots/foundation/ssattrs.hpp>
 #include <parrots/darray/darraymath.hpp>
 
+#define USE_CNNL 0
+#if USE_CNNL
+#include <parrots/compute/cnnldescriptor.hpp>
+#include <parrots/compute/cnnlhandle.hpp>
+#include <parrots/compute/cnnlquantize.hpp>
+#endif
+
 #include "modulated_deform_conv_pytorch.h"
 #include "parrots_mlu_helper.hpp"
 
@@ -96,6 +103,38 @@ void modulated_deform_conv_backward_cpu_parrots(
 
 #ifdef PARROTS_USE_CAMB
 
+#if USE_CNNL
+
+static void cambTransposeTo(ContextBase& ctx, const DArrayLite& in, DArrayLite& out, cnnlTensorLayout_t layoutIn,
+                            cnnlTensorLayout_t layoutOut) {
+    CnnlHandle& handle = CnnlHandle::get(ctx);
+    CnnlTensorDesc inDesc(in.spec(), layoutIn);
+    CnnlTensorDesc outDesc(in.spec(), layoutOut);
+    std::vector<int> order;
+    if (layoutIn == CNNL_LAYOUT_NHWC && layoutOut == CNNL_LAYOUT_HWCN) {
+        order = {1, 2, 3, 0};
+    } else if (layoutIn == CNNL_LAYOUT_NHWC && layoutOut == CNNL_LAYOUT_NCHW) {
+        order = {0, 3, 1, 2};
+    } else if (layoutIn == CNNL_LAYOUT_NCHW && layoutOut == CNNL_LAYOUT_HWCN) {
+        order = {2, 3, 1, 0};
+    } else if (layoutIn == CNNL_LAYOUT_NCHW && layoutOut == CNNL_LAYOUT_NHWC) {
+        order = {0, 2, 3, 1};
+    } else if (layoutIn == CNNL_LAYOUT_HWCN && layoutOut == CNNL_LAYOUT_NHWC) {
+        order = {3, 0, 1, 2};
+    } else if (layoutIn == CNNL_LAYOUT_HWCN && layoutOut == CNNL_LAYOUT_NCHW) {
+        order = {3, 2, 0, 1};
+    } else {
+        PARROTS_NOTSUPPORTED << "cambTransposeTo requires "
+                << "parrots::MemoryFormat in [CNNL_LAYOUT_NHWC, CNNL_LAYOUT_NCHW, CNNL_LAYOUT_HWCN].\n";
+    }
+
+    CnnlTransposeDesc transDesc(4, order.data());
+    PARROTS_CALLCNNL(
+        cnnlTranspose(handle.native(), transDesc.get(), inDesc.get(), in.data(), outDesc.get(), out.data()));
+}
+
+#endif
+
 void modulated_deform_conv_forward_camb_parrots(
         CambContext& ctx, const SSElement& attr, const OperatorBase::in_list_t& ins,
         OperatorBase::out_list_t& outs) {
@@ -163,6 +202,68 @@ void modulated_deform_conv_forward_camb_parrots(
                                    DArrayShape(channels * kernel_h * kernel_w, 1 * height_out * width_out));
     fill(ctx, columns, 0);
 
+#if USE_CNNL
+    std::vector<int> padding_t(4);
+    std::vector<int> stride_t(2);
+    std::vector<int> dilation_t(2);
+    padding_t[0] = pad_h;
+    padding_t[1] = pad_w;
+    padding_t[3] = pad_h;
+    padding_t[4] = pad_w;
+    stride_t[0] = stride_h;
+    stride_t[1] = stride_w;
+    dilation_t[0] = dilation_h;
+    dilation_t[1] = dilation_w;
+    int im2col_step = 1;
+
+    DArrayLite inputTemp, offsetTemp, maskTemp, weightTemp, outputTemp;
+    inputTemp = ctx.createDArrayLite(input.spec().duplicate(parrots::MemoryFormat::ChannelsLast));
+    offsetTemp = ctx.createDArrayLite(offset.spec().duplicate(parrots::MemoryFormat::ChannelsLast));
+    maskTemp = ctx.createDArrayLite(mask.spec().duplicate(parrots::MemoryFormat::ChannelsLast));
+    weightTemp = ctx.createDArrayLite(weight.spec().duplicate(parrots::MemoryFormat::ChannelsLast));
+    outputTemp = ctx.createDArrayLite(output.spec().duplicate(parrots::MemoryFormat::ChannelsLast));
+    cambTransposeTo(ctx, input, inputTemp, CNNL_LAYOUT_NCHW, CNNL_LAYOUT_NHWC);
+    cambTransposeTo(ctx, offset, offsetTemp, CNNL_LAYOUT_NCHW, CNNL_LAYOUT_NHWC);
+    cambTransposeTo(ctx, mask, maskTemp, CNNL_LAYOUT_NCHW, CNNL_LAYOUT_NHWC);
+    cambTransposeTo(ctx, weight, weightTemp, CNNL_LAYOUT_NCHW, CNNL_LAYOUT_NHWC);
+    cambTransposeTo(ctx, output, outputTemp, CNNL_LAYOUT_NCHW, CNNL_LAYOUT_NHWC);
+
+    cnnlDCNDescriptor_t dcn_desc;
+    PARROTS_CALLCNNL(cnnlCreateDCNDescriptor(&dcn_desc));
+    PARROTS_CALLCNNL(cnnlSetDCNDescriptor(dcn_desc, inputTemp.ndims(), padding_t.data(), stride_t.data(),
+            dilation_t.data(), deformable_group, group, im2col_step, CNNL_DTYPE_FLOAT));
+
+    CnnlHandle& handle = CnnlHandle::get(ctx);
+    CnnlTensorDesc inputDesc(inputTemp.spec());
+    CnnlTensorDesc offsetDesc(offsetTemp.spec());
+    CnnlTensorDesc maskDesc(maskTemp.spec());
+    CnnlTensorDesc weightDesc(weightTemp.spec());
+    CnnlTensorDesc biasDesc(bias.spec());
+    CnnlTensorDesc outputDesc(outputTemp.spec());
+    size_t workspace_size = 0;
+
+    cnnlDataType_t onChipDataType = getQuantifyDtype(input.elemType());
+    inputDesc.setOnchipDtype(onChipDataType);
+    offsetDesc.setOnchipDtype(onChipDataType);
+    weightDesc.setOnchipDtype(onChipDataType);
+    outputDesc.setOnchipDtype(getCnnlDataType(outputTemp.elemType()));
+
+
+    PARROTS_CALLCNNL(cnnlGetDCNForwardWorkspaceSize(handle.native(), dcn_desc, inputDesc.get(), offsetDesc.get(),
+            maskDesc.get(), weightDesc.get(), biasDesc.get(), outputDesc.get(), &workspace_size));
+
+    DArrayLite workspace = ctx.createDArrayLite(type_<char>(), DArrayShape(workspace_size));
+    PARROTS_CALLCNNL(cnnlDCNForward(handle.native(), dcn_desc, inputDesc.get(), inputTemp.data(),
+            offsetDesc.get(), offsetTemp.data(), maskDesc.get(), maskTemp.data(), weightDesc.get(),weightTemp.data(),
+            with_bias ? biasDesc.get() : nullptr,
+            with_bias ? bias.data() : nullptr,
+            workspace.data(), workspace_size, outputDesc.get(), outputTemp.data()));
+    PARROTS_CALLCNNL(cnnlDestroyDCNDescriptor(dcn_desc));
+
+    cambTransposeTo(ctx, outputTemp, output, CNNL_LAYOUT_NHWC, CNNL_LAYOUT_NCHW);
+
+#else
+
     output = output.view({output.dim(0), group, output.dim(1) / group,
                             output.dim(2), output.dim(3)});
 
@@ -206,6 +307,7 @@ void modulated_deform_conv_forward_camb_parrots(
     if (with_bias) {
         add(ctx, output, bias.view({1, bias.dim(0), 1, 1}), output);
     }
+#endif
 }
 
 void modulated_deform_conv_backward_camb_parrots(
