@@ -8,7 +8,7 @@ __nram__ char nram_buffer[MAX_NRAM_SIZE];
 namespace forward {
 
 template <typename T>
-__mlu_func__ void dmcn_im2col_bilinear(const T *input, const int data_width,
+__mlu_func__ void dmcn_im2col_bilinear(const int c_im, const T *input, const int data_width,
                                   const int height, const int width, T* h, T* w,
                                   T* val, T* cond, const int width_col, const uint32_t width_stride) {
     // __bang_gt_scalar(cond, h_im, -1, width_stride);
@@ -33,28 +33,6 @@ __mlu_func__ void dmcn_im2col_bilinear(const T *input, const int data_width,
     T* v3_temp = v2_temp + width_stride;
     T* v4_temp = v3_temp + width_stride;
 
-
-    for (uint32_t w_col = 0; w_col < width_col; w_col++) {
-        h_low[w_col] = floorf(h[w_col]);
-        w_low[w_col] = floorf(w[w_col]);
-    }
-
-    __bang_add_const(h_high, h_low, 1, width_stride);
-    __bang_add_const(w_high, w_low, 1, width_stride);
-    __bang_sub(lh, h, h_low, width_stride);
-    __bang_sub(lw, w, w_low, width_stride);
-    __bang_sub(hh, h_high, h, width_stride);
-    __bang_sub(hw, w_high, w, width_stride);
-
-    __bang_mul_const(v1_temp, h_low, data_width, width_stride);
-    __bang_add(v2_temp, v1_temp, w_high, width_stride);
-    __bang_add(v1_temp, v1_temp, w_low, width_stride);
-
-    __bang_mul_const(v3_temp, h_high, data_width, width_stride);
-    __bang_add(v4_temp, v3_temp, w_high, width_stride);
-    __bang_add(v3_temp, v3_temp, w_low, width_stride);
-
-
     T* h_cond1 = v4_temp + width_stride;
     T* h_cond2 = h_cond1 + width_stride;
     T* w_cond1 = h_cond2 + width_stride;
@@ -64,43 +42,65 @@ __mlu_func__ void dmcn_im2col_bilinear(const T *input, const int data_width,
     T* w_cond3 = h_cond4 + width_stride;
     T* w_cond4 = w_cond3 + width_stride;
 
-    __nramset(h_cond1, width_stride, (T)-1);
-    __bang_gt(h_cond1, h, h_cond1, width_stride);
-    __nramset(h_cond2, width_stride, (T)height);
-    __bang_lt(h_cond2, h, h_cond2, width_stride);
-    __bang_and(h_cond1, h_cond1, h_cond2, width_stride);
-
-
-    __nramset(w_cond1, width_stride, (T)-1);
-    __bang_gt(w_cond1, w, w_cond1, width_stride);
-    __nramset(w_cond2, width_stride, (T)width);
-    __bang_lt(w_cond2, w, w_cond2, width_stride);
-    __bang_and(w_cond1, w_cond1, w_cond2, width_stride);
-    __bang_and(cond, h_cond1, w_cond1, width_stride);
-
-    __nramset(h_cond3, width_stride, (T)0);
-    __bang_ge(h_cond3, h, h_cond3, width_stride);
-    __nramset(h_cond4, width_stride, (T)(height-1));
-    __bang_le(h_cond4, h, h_cond4, width_stride);
+    if (c_im == 0) {
+        for (uint32_t w_col = 0; w_col < width_col; w_col++) {
+            h_low[w_col] = floorf(h[w_col]);
+            w_low[w_col] = floorf(w[w_col]);
+        }
     
-    __nramset(w_cond3, width_stride, (T)0);
-    __bang_ge(w_cond3, w, w_cond3, width_stride);
-    __nramset(w_cond4, width_stride, (T)(width-1));
-    __bang_le(w_cond4, w, w_cond4, width_stride);
+        __bang_add_const(h_high, h_low, 1, width_stride);
+        __bang_add_const(w_high, w_low, 1, width_stride);
+        __bang_sub(lh, h, h_low, width_stride);
+        __bang_sub(lw, w, w_low, width_stride);
+        __bang_sub(hh, h_high, h, width_stride);
+        __bang_sub(hw, w_high, w, width_stride);
+    
+        __bang_mul_const(v1_temp, h_low, data_width, width_stride);
+        __bang_add(v2_temp, v1_temp, w_high, width_stride);
+        __bang_add(v1_temp, v1_temp, w_low, width_stride);
+    
+        __bang_mul_const(v3_temp, h_high, data_width, width_stride);
+        __bang_add(v4_temp, v3_temp, w_high, width_stride);
+        __bang_add(v3_temp, v3_temp, w_low, width_stride);
 
-    __bang_and(h_cond1, cond, h_cond3, width_stride);
-    __bang_and(h_cond1, h_cond1, w_cond3, width_stride);
-    __bang_and(h_cond2, cond, h_cond3, width_stride);
-    __bang_and(h_cond2, h_cond2, w_cond4, width_stride);
-    __bang_and(w_cond1, cond, h_cond4, width_stride);
-    __bang_and(w_cond1, w_cond1, w_cond3, width_stride);
-    __bang_and(w_cond2, cond, h_cond4, width_stride);
-    __bang_and(w_cond2, w_cond2, w_cond4, width_stride);
-
-    __bang_mul(v1_temp, v1_temp, h_cond1, width_stride);
-    __bang_mul(v2_temp, v2_temp, h_cond2, width_stride);
-    __bang_mul(v3_temp, v3_temp, w_cond1, width_stride);
-    __bang_mul(v4_temp, v4_temp, w_cond2, width_stride);
+        __nramset(h_cond1, width_stride, (T)-1);
+        __bang_gt(h_cond1, h, h_cond1, width_stride);
+        __nramset(h_cond2, width_stride, (T)height);
+        __bang_lt(h_cond2, h, h_cond2, width_stride);
+        __bang_and(h_cond1, h_cond1, h_cond2, width_stride);
+    
+    
+        __nramset(w_cond1, width_stride, (T)-1);
+        __bang_gt(w_cond1, w, w_cond1, width_stride);
+        __nramset(w_cond2, width_stride, (T)width);
+        __bang_lt(w_cond2, w, w_cond2, width_stride);
+        __bang_and(w_cond1, w_cond1, w_cond2, width_stride);
+        __bang_and(cond, h_cond1, w_cond1, width_stride);
+    
+        __nramset(h_cond3, width_stride, (T)0);
+        __bang_ge(h_cond3, h, h_cond3, width_stride);
+        __nramset(h_cond4, width_stride, (T)(height-1));
+        __bang_le(h_cond4, h, h_cond4, width_stride);
+        
+        __nramset(w_cond3, width_stride, (T)0);
+        __bang_ge(w_cond3, w, w_cond3, width_stride);
+        __nramset(w_cond4, width_stride, (T)(width-1));
+        __bang_le(w_cond4, w, w_cond4, width_stride);
+    
+        __bang_and(h_cond1, cond, h_cond3, width_stride);
+        __bang_and(h_cond1, h_cond1, w_cond3, width_stride);
+        __bang_and(h_cond2, cond, h_cond3, width_stride);
+        __bang_and(h_cond2, h_cond2, w_cond4, width_stride);
+        __bang_and(w_cond1, cond, h_cond4, width_stride);
+        __bang_and(w_cond1, w_cond1, w_cond3, width_stride);
+        __bang_and(w_cond2, cond, h_cond4, width_stride);
+        __bang_and(w_cond2, w_cond2, w_cond4, width_stride);
+    
+        __bang_mul(v1_temp, v1_temp, h_cond1, width_stride);
+        __bang_mul(v2_temp, v2_temp, h_cond2, width_stride);
+        __bang_mul(v3_temp, v3_temp, w_cond1, width_stride);
+        __bang_mul(v4_temp, v4_temp, w_cond2, width_stride);
+    }
     
     for (uint32_t w_col = 0; w_col < width_col; w_col++) {
         __memcpy_async(v1 + w_col, input + (int)v1_temp[w_col], sizeof(T), GDRAM2NRAM);
@@ -146,76 +146,75 @@ __mlu_func__ void modulated_deformable_im2col_camb_block(
     // gettimeofday(&begin, NULL);
     const uint32_t nfu_align_num = NFU_ALIGN_SIZE / sizeof(T);
     const uint32_t width_stride = ((width_col - 1) / nfu_align_num + 1) * nfu_align_num;
-    for (uint32_t index = idx * width_col; index < n; index += core_nums * width_col) {
-        // index index of output matrix
-        // const int w_col = index % width_col;
-        const int h_col = (index / width_col) % height_col;
-        const int b_col = (index / width_col / height_col) % batch_size;
-        const int c_im = (index / width_col / height_col) / batch_size;
-        const int c_col = c_im * kernel_h * kernel_w;
+    T* w_in = (T*)nram_buffer;
+    T* w_in_temp = w_in + width_stride;
+    for (int w_col = 0; w_col < width_col; w_col++) {
+        w_in[w_col] = (T)w_col;
+    }
+    __nramset(w_in_temp, width_stride, (T)stride_w);
+    __bang_mul(w_in, w_in, w_in_temp, width_stride);
+    __nramset(w_in_temp, width_stride, (T)pad_w);
+    __bang_sub(w_in, w_in, w_in_temp, width_stride);
 
-        // compute deformable group index
-        const int deformable_group_index = c_im / channel_per_deformable_group;
-
-        const int h_in = h_col * stride_h - pad_h;
-        // const int w_in = w_col * stride_w - pad_w;
-        int* w_in = (int*)nram_buffer;
-
-        for (uint32_t w_col = 0; w_col < width_col; w_col++) {
-            w_in[w_col] = int(w_col * stride_w - pad_w);
-            // if (taskId == 0) __bang_printf("w_in[w_col] = %d \n", w_in[w_col]);
-        }
-
-        T *data_col_ptr =
-            data_col + ((c_col * batch_size + b_col) * height_col + h_col) * width_col;
-        const T *data_im_ptr =
-            data_im + (b_col * num_channels + c_im) * height * width;
-        const T *data_offset_ptr =
-            data_offset + (b_col * deformable_group + deformable_group_index) * 2 *
-                            kernel_h * kernel_w * height_col * width_col;
-
-        const T *data_mask_ptr =
-            data_mask + (b_col * deformable_group + deformable_group_index) *
-                            kernel_h * kernel_w * height_col * width_col;
-
-        for (int i = 0; i < kernel_h; ++i) {
-            for (int j = 0; j < kernel_w; ++j) {
-                const int data_offset_h_ptr =
-                    ((2 * (i * kernel_w + j)) * height_col + h_col) * width_col;
-                const int data_offset_w_ptr =
-                    ((2 * (i * kernel_w + j) + 1) * height_col + h_col) * width_col;
-                const int data_mask_hw_ptr =
-                    ((i * kernel_w + j) * height_col + h_col) * width_col;
-
-                T* offset_h = (T*)(w_in + width_stride);
-                T* offset_w = offset_h + width_stride;
-                T* mask = offset_w + width_stride;
-                T* h_im = mask + width_stride;
-                T* w_im = h_im + width_stride;
-                T* val = w_im + width_stride;
-                T* cond = val + width_stride;
-
-                __memcpy_async(offset_h, data_offset_ptr + data_offset_h_ptr, width_col * sizeof(T), GDRAM2NRAM);
-                __memcpy_async(offset_w, data_offset_ptr + data_offset_w_ptr, width_col * sizeof(T), GDRAM2NRAM);
-                __memcpy_async(mask, data_mask_ptr + data_mask_hw_ptr, width_col * sizeof(T), GDRAM2NRAM);
-                __asm__ volatile("sync;");
+    for (int b_col = 0; b_col < batch_size; b_col++) {
+        for (uint32_t h_col = idx; h_col < height_col; h_col += core_nums) {
+            for (int i = 0; i < kernel_h; ++i) {
+                for (int j = 0; j < kernel_w; ++j) {
+                    for (int c_im = 0; c_im < num_channels; c_im++) {
+                        const int c_col = c_im * kernel_h * kernel_w;
                 
-                __bang_add_const(offset_h, offset_h, (T)(h_in + i * dilation_h), width_stride);
-                h_im = offset_h;
+                        // compute deformable group index
+                        const int deformable_group_index = c_im / channel_per_deformable_group;
                 
-                __bang_add_const(offset_w, offset_w, (T)(j * dilation_w), width_stride);
+                        const int h_in = h_col * stride_h - pad_h;
+                
+                        T *data_col_ptr =
+                            data_col + ((c_col * batch_size + b_col) * height_col + h_col) * width_col;
+                        const T *data_im_ptr =
+                            data_im + (b_col * num_channels + c_im) * height * width;
+                        const T *data_offset_ptr =
+                            data_offset + (b_col * deformable_group + deformable_group_index) * 2 *
+                                            kernel_h * kernel_w * height_col * width_col;
+                        data_col_ptr += (i * kernel_w + j) * (batch_size * height_col * width_col);
 
-                for (uint32_t w_col = 0; w_col < width_col; w_col++) {
-                    // h_im[w_col] = h_in + i * dilation_h + offset_h[w_col];
-                    w_im[w_col] = w_in[w_col] + offset_w[w_col];
+                        const T *data_mask_ptr =
+                            data_mask + (b_col * deformable_group + deformable_group_index) *
+                                            kernel_h * kernel_w * height_col * width_col;
+
+                        const int data_offset_h_ptr =
+                            ((2 * (i * kernel_w + j)) * height_col + h_col) * width_col;
+                        const int data_offset_w_ptr =
+                            ((2 * (i * kernel_w + j) + 1) * height_col + h_col) * width_col;
+                        const int data_mask_hw_ptr =
+                            ((i * kernel_w + j) * height_col + h_col) * width_col;
+        
+                        T* offset_h = (T*)(w_in_temp + width_stride);
+                        T* offset_w = offset_h + width_stride;
+                        T* mask = offset_w + width_stride;
+                        T* h_im = mask + width_stride;
+                        T* w_im = h_im + width_stride;
+                        T* val = w_im + width_stride;
+                        T* cond = val + width_stride;
+        
+                        __memcpy_async(offset_h, data_offset_ptr + data_offset_h_ptr, width_col * sizeof(T), GDRAM2NRAM);
+                        __memcpy_async(offset_w, data_offset_ptr + data_offset_w_ptr, width_col * sizeof(T), GDRAM2NRAM);
+                        __memcpy_async(mask, data_mask_ptr + data_mask_hw_ptr, width_col * sizeof(T), GDRAM2NRAM);
+                        __asm__ volatile("sync;");
+                        
+                        __bang_add_const(offset_h, offset_h, (T)(h_in + i * dilation_h), width_stride);
+                        h_im = offset_h;
+                        
+                        __bang_add_const(offset_w, offset_w, (T)(j * dilation_w), width_stride);
+                        __bang_add(w_im, w_in, offset_w, width_stride);
+        
+                        dmcn_im2col_bilinear(c_im, data_im_ptr, width, height, width, h_im, w_im, val, cond, width_col, width_stride);
+        
+                        __bang_mul(val, val, mask, width_stride);
+                        __asm__ volatile("sync;");
+                        __memcpy_async(data_col_ptr, val, width_col * sizeof(T), NRAM2GDRAM);
+                        // data_col_ptr += batch_size * height_col * width_col;
+                    }
                 }
-
-                dmcn_im2col_bilinear(data_im_ptr, width, height, width, h_im, w_im, val, cond, width_col, width_stride);
-
-                __bang_mul(val, val, mask, width_stride);
-                __asm__ volatile("sync;");
-                __memcpy_async(data_col_ptr, val, width_col * sizeof(T), NRAM2GDRAM);
-                data_col_ptr += batch_size * height_col * width_col;
             }
         }
     }
