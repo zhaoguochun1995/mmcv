@@ -195,10 +195,6 @@ void modulated_deform_conv_forward_camb_parrots(
     output = output.view({batch, channels_out, height_out, width_out});
     fill(ctx, output, 0);
 
-    columns = ctx.createDArrayLite(input.elemType(),
-                                   DArrayShape(channels * kernel_h * kernel_w, 1 * height_out * width_out));
-    fill(ctx, columns, 0);
-
     if (output.dim(2) == offset.dim(2) && output.dim(3) == offset.dim(3)) {
         std::vector<int> padding_t(4);
         std::vector<int> stride_t(2);
@@ -260,6 +256,9 @@ void modulated_deform_conv_forward_camb_parrots(
         cambTransposeTo(ctx, outputTemp, output, CNNL_LAYOUT_NHWC, CNNL_LAYOUT_NCHW);
 
     } else {
+        columns = ctx.createDArrayLite(input.elemType(),
+                                   DArrayShape(channels * kernel_h * kernel_w, 1 * height_out * width_out));
+        fill(ctx, columns, 0);
         output = output.view({output.dim(0), group, output.dim(1) / group,
                                 output.dim(2), output.dim(3)});
 
@@ -271,19 +270,28 @@ void modulated_deform_conv_forward_camb_parrots(
             cnrtDataType_t d_type = getCnrtDataType(input.elemType());
 
             // launch kernel
+            DArrayLite input_nhwc = ctx.createDArrayLite(input.spec().duplicate(parrots::MemoryFormat::ChannelsLast));
+            cambTransposeTo(ctx, input, input_nhwc, CNNL_LAYOUT_NCHW, CNNL_LAYOUT_NHWC);
+            DArrayLite offset_nhwc = ctx.createDArrayLite(offset.spec().duplicate(parrots::MemoryFormat::ChannelsLast));
+            cambTransposeTo(ctx, offset, offset_nhwc, CNNL_LAYOUT_NCHW, CNNL_LAYOUT_NHWC);
+            DArrayLite mask_nhwc = ctx.createDArrayLite(mask.spec().duplicate(parrots::MemoryFormat::ChannelsLast));
+            cambTransposeTo(ctx, mask, mask_nhwc, CNNL_LAYOUT_NCHW, CNNL_LAYOUT_NHWC);
+            columns = columns.view({1, channels, kernel_h * kernel_w, height_out * width_out});
+            DArrayLite columns_nhwc = ctx.createDArrayLite(columns.spec().duplicate(parrots::MemoryFormat::ChannelsLast));
+
             modulated_deformable_im2col_camb(
                 k_dim, k_type, queue, d_type,
-                input[b].data(), offset[b].data(), mask[b].data(),
+                input_nhwc[b].data(), offset[b].data(), mask[b].data(),
                 1, channels, height,
                 width, height_out, width_out,
                 kernel_h, kernel_w, pad_h, pad_w,
                 stride_h, stride_w, dilation_h,
-                dilation_w, deformable_group, columns.data());
-
+                dilation_w, deformable_group, columns_nhwc.data());
+            cambTransposeTo(ctx, columns_nhwc, columns, CNNL_LAYOUT_NHWC, CNNL_LAYOUT_NCHW);
             // divide into group
             weight = weight.view({group, weight.dim(0) / group, weight.dim(1),
                                 weight.dim(2), weight.dim(3)});
-            columns = columns.view({group, columns.dim(0) / group, columns.dim(1)});
+            columns = columns.view({group, channels * kernel_h * kernel_w / group, 1 * height_out * width_out});
 
             for (int g = 0; g < group; g++) {
                 DArrayLite outputBG = output[b][g].view({output[b][g].dim(0), output[b][g].size() / output[b][g].dim(0)});
