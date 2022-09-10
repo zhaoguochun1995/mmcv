@@ -10,8 +10,8 @@ namespace forward {
 template <typename T>
 __mlu_func__ void dmcn_im2col_bilinear(const T *input, const int data_width,
                                     const int height, const int width, T h, T w,
-                                    const int c, const int num_channels, T* val, T* temp,
-                                    const int channel_per_deformable_group, const int channel_per_group_align) {
+                                    const int c, const int num_channels, T* nram_val, T* nram_temp,
+                                    const int channel_per_group_align) {
     int h_low = floorf(h);
     int w_low = floorf(w);
     int h_high = h_low + 1;
@@ -21,7 +21,7 @@ __mlu_func__ void dmcn_im2col_bilinear(const T *input, const int data_width,
     T lw = w - w_low;
     T hh = 1 - lh, hw = 1 - lw;
 
-    T* v1 = temp;
+    T* v1 = nram_temp;
     T* v2 = v1 + channel_per_group_align;
     T* v3 = v2 + channel_per_group_align;
     T* v4 = v3 + channel_per_group_align;
@@ -50,9 +50,9 @@ __mlu_func__ void dmcn_im2col_bilinear(const T *input, const int data_width,
     __bang_mul_const(v3, v3, w3, channel_per_group_align);
     __bang_mul_const(v4, v4, w4, channel_per_group_align);
 
-    __bang_add(val, v1, v2, channel_per_group_align);
-    __bang_add(val, val, v3, channel_per_group_align);
-    __bang_add(val, val, v4, channel_per_group_align);
+    __bang_add(nram_val, v1, v2, channel_per_group_align);
+    __bang_add(nram_val, nram_val, v3, channel_per_group_align);
+    __bang_add(nram_val, nram_val, v4, channel_per_group_align);
 }
 
 template <typename T>
@@ -72,51 +72,70 @@ __mlu_func__ void modulated_deformable_im2col_camb_block(
     const T *data_im_ptr = data_im;
     const uint32_t nfu_align_num = NFU_ALIGN_SIZE / sizeof(T);
     const uint32_t channel_per_group_align = CEIL_ALIGN(channel_per_deformable_group, nfu_align_num);
+    const uint32_t offset_batch_align = nfu_align_num;
+    T* nram_data_offset_h = (T*)nram_buffer;
+    T* nram_data_offset_w = nram_data_offset_h + offset_batch_align;
+    T* nram_data_mask = nram_data_offset_w + offset_batch_align;
 
     // batch_size must be 1
-    for (uint32_t index = idx; index < hw_col; index += core_nums) {
-        const uint32_t h_col = index / width_col;
-        const uint32_t w_col = index % width_col;
-        const int h_in = h_col * stride_h - pad_h;
-        const int w_in = w_col * stride_w - pad_w;
+    for (int i = 0; i < kernel_h; ++i) {
+        for (int j = 0; j < kernel_w; ++j) {
+            for(int deformable_group_index = 0; deformable_group_index < deformable_group; deformable_group_index++) {
+                int c_im = deformable_group_index * channel_per_deformable_group;
+                const T *data_offset_ptr =
+                    data_offset + deformable_group_index * 2 * kernel_num * hw_col;
+                const T *data_mask_ptr =
+                    data_mask + deformable_group_index * kernel_num * hw_col;
 
-        for (int i = 0; i < kernel_h; ++i) {
-            for (int j = 0; j < kernel_w; ++j) {
-                for(int deformable_group_index = 0; deformable_group_index < deformable_group; deformable_group_index++) {
-                    int c_im = deformable_group_index * channel_per_deformable_group;
-                    T *data_col_ptr =
-                        data_col + (((i * kernel_w + j) * height_col + h_col) * width_col + w_col) * num_channels + c_im;
-                    const T *data_offset_ptr =
-                        data_offset + deformable_group_index * 2 * kernel_num * hw_col;
-                    const T *data_mask_ptr =
-                        data_mask + deformable_group_index * kernel_num * hw_col;
-                    const int data_offset_h_ptr =
-                        ((2 * (i * kernel_w + j)) * height_col + h_col) * width_col + w_col;
-                    const int data_offset_w_ptr =
-                        ((2 * (i * kernel_w + j) + 1) * height_col + h_col) * width_col + w_col;
-                    const int data_mask_hw_ptr =
-                        ((i * kernel_w + j) * height_col + h_col) * width_col + w_col;
+                for (uint32_t index_start = idx * offset_batch_align; index_start < hw_col; index_start += core_nums * offset_batch_align) {
+                    for(uint32_t n = 0; n < offset_batch_align; n++) {
+                        uint32_t index = index_start + n;
+                        if (index >= hw_col) {
+                            break;
+                        }
+                        const uint32_t h_col = index / width_col;
+                        const uint32_t w_col = index % width_col;
+                        const int h_in = h_col * stride_h - pad_h;
+                        const int w_in = w_col * stride_w - pad_w;
 
-                    const T offset_h = data_offset_ptr[data_offset_h_ptr];
-                    const T offset_w = data_offset_ptr[data_offset_w_ptr];
-                    const T mask = data_mask_ptr[data_mask_hw_ptr];
-                    const T h_im = h_in + i * dilation_h + offset_h;
-                    const T w_im = w_in + j * dilation_w + offset_w;
+                        T *data_col_ptr =
+                            data_col + (((i * kernel_w + j) * height_col) * width_col + index) * num_channels + c_im;
+                        const int data_offset_h_start =
+                            ((2 * (i * kernel_w + j)) * height_col) * width_col + index_start;
+                        const int data_offset_w_start =
+                            ((2 * (i * kernel_w + j) + 1) * height_col) * width_col + index_start;
+                        const int data_mask_hw_start =
+                            ((i * kernel_w + j) * height_col) * width_col + index_start;
 
-                    T* val = (T*)nram_buffer;
-                    T* temp = val + channel_per_group_align;
-                    __nramset(val, channel_per_group_align, (T)0);
-                    if (h_im > -1 && w_im > -1 && h_im < height && w_im < width) {
-                        dmcn_im2col_bilinear(data_im_ptr, width, height, width, h_im, w_im, c_im, num_channels,
-                                             val, temp, channel_per_deformable_group, channel_per_group_align);
+                        if (n == 0) {
+                            __memcpy_async(nram_data_offset_h, data_offset_ptr + data_offset_h_start, offset_batch_align * sizeof(T), GDRAM2NRAM);
+                            __memcpy_async(nram_data_offset_w, data_offset_ptr + data_offset_w_start, offset_batch_align * sizeof(T), GDRAM2NRAM);
+                            __memcpy_async(nram_data_mask, data_mask_ptr + data_mask_hw_start, offset_batch_align * sizeof(T), GDRAM2NRAM);
+                            __asm__ volatile("sync;");
+                        }
+                        // const T offset_h = data_offset_ptr[data_offset_h_ptr];
+                        // const T offset_w = data_offset_ptr[data_offset_w_ptr];
+                        // const T mask = data_mask_ptr[data_mask_hw_ptr];
+                        const T offset_h = nram_data_offset_h[n];
+                        const T offset_w = nram_data_offset_w[n];
+                        const T mask = nram_data_mask[n];
+                        const T h_im = h_in + i * dilation_h + offset_h;
+                        const T w_im = w_in + j * dilation_w + offset_w;
+
+                        T* nram_val = (T*)nram_data_mask + offset_batch_align;
+                        T* nram_temp = nram_val + channel_per_group_align;
+                        __nramset(nram_val, channel_per_group_align, (T)0);
+                        if (h_im > -1 && w_im > -1 && h_im < height && w_im < width) {
+                            dmcn_im2col_bilinear(data_im_ptr, width, height, width, h_im, w_im, c_im, num_channels,
+                                                 nram_val, nram_temp, channel_per_group_align);
+                        }
+                        __bang_mul_const(nram_val, nram_val, mask, channel_per_group_align);
+                        __asm__ volatile("sync;");
+                        __memcpy_async(data_col_ptr, nram_val, channel_per_deformable_group * sizeof(T), NRAM2GDRAM);
                     }
-                    __bang_mul_const(val, val, mask, channel_per_group_align);
-                    __asm__ volatile("sync;");
-                    __memcpy_async(data_col_ptr, val, channel_per_deformable_group * sizeof(T), NRAM2GDRAM);
                 }
             }
         }
-        
     }
 }
 
