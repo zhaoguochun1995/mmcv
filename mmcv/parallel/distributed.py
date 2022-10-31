@@ -41,7 +41,6 @@ class MMDistributedDataParallel(DistributedDataParallel):
 
         # In PyTorch >= 1.7, ``reducer._rebuild_buckets()`` is moved from the
         # end of backward to the beginning of forward.
-        # print("TORCH_VERSION: ", TORCH_VERSION)
         if ('parrots' != TORCH_VERSION
                 and digit_version(TORCH_VERSION) >= digit_version('1.7')
                 and self.reducer._rebuild_buckets()):

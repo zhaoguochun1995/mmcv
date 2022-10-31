@@ -8,7 +8,7 @@ if 'parrots' not in torch.__version__:
     _torch_version_meshgrid_indexing = False
 else:
     _torch_version_meshgrid_indexing = (
-        'parrots' not in TORCH_VERSION
+        'parrots' != TORCH_VERSION
         and digit_version(TORCH_VERSION) >= digit_version('1.10.0a0'))
 
 
