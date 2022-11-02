@@ -371,7 +371,7 @@ void modulated_deform_conv_backward_camb_parrots(
         (height + 2 * pad_h - (dilation_h * (kernel_h - 1) + 1)) / stride_h + 1;
     const int width_out =
         (width + 2 * pad_w - (dilation_w * (kernel_w - 1) + 1)) / stride_w + 1;
-
+    PARROTS_NOTSUPPORTED << "modulated_deform_conv_backward";
     // modulated_deform_conv_backward(
     //     input, weight, bias, ones, offset, mask, columns, grad_input, grad_weight,
     //     grad_bias, grad_offset, grad_mask, grad_output, kernel_h, kernel_w,
