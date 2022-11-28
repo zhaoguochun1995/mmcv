@@ -127,7 +127,7 @@ class GradientCumulativeOptimizerHook(OptimizerHook):
             runner.optimizer.zero_grad()
 
 
-if (TORCH_VERSION != 'parrots'
+if (TORCH_VERSION == 'parrots'
         or digit_version(TORCH_VERSION) >= digit_version('1.6.0')):
 
     @HOOKS.register_module()
