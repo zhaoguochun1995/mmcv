@@ -3,15 +3,16 @@
 #include <bang.h>
 #include <sys/time.h>
 #include <iostream>
+#include <stdexcept>
+
 __nram__ char nram_buffer[MAX_NRAM_SIZE];
 
-namespace forward {
 
 template <typename T>
 __mlu_func__ void dmcn_im2col_bilinear(const T *input, const int data_width,
                                     const int height, const int width, T h, T w,
                                     const int c, const int num_channels, T* nram_val, T* nram_temp,
-                                    const int channel_per_group_align) {
+                                    const int channel_per_deformable_group, const int channel_per_group_align) {
     int h_low = floorf(h);
     int w_low = floorf(w);
     int h_high = h_low + 1;
@@ -31,16 +32,20 @@ __mlu_func__ void dmcn_im2col_bilinear(const T *input, const int data_width,
     __nramset(v4, channel_per_group_align, (T)0);
 
     if (h_low >= 0 && w_low >= 0) {
-        __memcpy_async(v1, input + (h_low * data_width + w_low) * num_channels + c, channel_per_group_align * sizeof(T), GDRAM2NRAM);
+        __memcpy_async(v1, input + (h_low * data_width + w_low) * num_channels + c,
+            channel_per_deformable_group * sizeof(T), GDRAM2NRAM);
     }
     if (h_low >= 0 && w_high <= width - 1) {
-        __memcpy_async(v2, input + (h_low * data_width + w_high) * num_channels + c, channel_per_group_align * sizeof(T), GDRAM2NRAM);
+        __memcpy_async(v2, input + (h_low * data_width + w_high) * num_channels + c,
+            channel_per_deformable_group * sizeof(T), GDRAM2NRAM);
     }
     if (h_high <= height - 1 && w_low >= 0) {
-        __memcpy_async(v3, input + (h_high * data_width + w_low) * num_channels + c, channel_per_group_align * sizeof(T), GDRAM2NRAM);
+        __memcpy_async(v3, input + (h_high * data_width + w_low) * num_channels + c,
+            channel_per_deformable_group * sizeof(T), GDRAM2NRAM);
     }
     if (h_high <= height - 1 && w_high <= width - 1) {
-        __memcpy_async(v4, input + (h_high * data_width + w_high) * num_channels + c, channel_per_group_align * sizeof(T), GDRAM2NRAM);
+        __memcpy_async(v4, input + (h_high * data_width + w_high) * num_channels + c,
+            channel_per_deformable_group * sizeof(T), GDRAM2NRAM);
     }
     __asm__ volatile("sync;");
 
@@ -56,7 +61,134 @@ __mlu_func__ void dmcn_im2col_bilinear(const T *input, const int data_width,
 }
 
 template <typename T>
-__mlu_func__ void modulated_deformable_im2col_camb_block(
+__mlu_func__ T dmcn_get_gradient_weight(T argmax_h, T argmax_w, const int h, const int w,
+                               const int height, const int width) {
+    if (argmax_h <= -1 || argmax_h >= height || argmax_w <= -1 ||
+        argmax_w >= width) {
+        // empty
+        return 0;
+    }
+
+    int argmax_h_low = floorf(argmax_h);
+    int argmax_w_low = floorf(argmax_w);
+    int argmax_h_high = argmax_h_low + 1;
+    int argmax_w_high = argmax_w_low + 1;
+
+    T weight = 0;
+    if (h == argmax_h_low && w == argmax_w_low)
+        weight = (h + 1 - argmax_h) * (w + 1 - argmax_w);
+    if (h == argmax_h_low && w == argmax_w_high)
+        weight = (h + 1 - argmax_h) * (argmax_w + 1 - w);
+    if (h == argmax_h_high && w == argmax_w_low)
+        weight = (argmax_h + 1 - h) * (w + 1 - argmax_w);
+    if (h == argmax_h_high && w == argmax_w_high)
+        weight = (argmax_h + 1 - h) * (argmax_w + 1 - w);
+    return weight;
+}
+
+template <typename T>
+__mlu_func__ void dmcn_get_coordinate_weight(T argmax_h, T argmax_w, const int height,
+                                 const int width, const T *im_data,
+                                 const int data_width, const int channels, const int bp_dir,
+                                 T* nram_val, T* nram_temp,
+                                 const int channel_per_deformable_group, const int channel_per_group_align) {
+    __nramset(nram_val, channel_per_group_align, (T)0);
+    __asm__ volatile("sync;");
+    if (argmax_h <= -1 || argmax_h >= height || argmax_w <= -1 ||
+        argmax_w >= width) {
+        // empty
+        return;
+    }
+
+    int argmax_h_low = floorf(argmax_h);
+    int argmax_w_low = floorf(argmax_w);
+    int argmax_h_high = argmax_h_low + 1;
+    int argmax_w_high = argmax_w_low + 1;
+
+    T* v1 = nram_temp;
+    T* v2 = v1 + channel_per_group_align;
+    T* v3 = v2 + channel_per_group_align;
+    T* v4 = v3 + channel_per_group_align;
+    __nramset(v1, channel_per_group_align, (T)0);
+    __nramset(v2, channel_per_group_align, (T)0);
+    __nramset(v3, channel_per_group_align, (T)0);
+    __nramset(v4, channel_per_group_align, (T)0);
+
+    if (bp_dir == 0) {
+        if (argmax_h_low >= 0 && argmax_w_low >= 0) {
+            __memcpy_async(v1, im_data + (argmax_h_low * data_width + argmax_w_low) * channels,
+                channel_per_deformable_group * sizeof(T), GDRAM2NRAM);
+        }
+        if (argmax_h_low >= 0 && argmax_w_high <= width - 1) {
+            __memcpy_async(v2, im_data + (argmax_h_low * data_width + argmax_w_high) * channels,
+                channel_per_deformable_group * sizeof(T), GDRAM2NRAM);
+        }
+        if (argmax_h_high <= height - 1 && argmax_w_low >= 0) {
+            __memcpy_async(v3, im_data + (argmax_h_high * data_width + argmax_w_low) * channels,
+                channel_per_deformable_group * sizeof(T), GDRAM2NRAM);
+        }
+        if (argmax_h_high <= height - 1 && argmax_w_high <= width - 1) {
+            __memcpy_async(v4, im_data + (argmax_h_high * data_width + argmax_w_high) * channels,
+                channel_per_deformable_group * sizeof(T), GDRAM2NRAM);
+        }
+        __asm__ volatile("sync;");
+        if (argmax_h_low >= 0 && argmax_w_low >= 0) {
+            __bang_mul_const(v1, v1, -1 * (argmax_w_low + 1 - argmax_w), channel_per_group_align);
+            __bang_add(nram_val, nram_val, v1, channel_per_group_align);
+        }
+        if (argmax_h_low >= 0 && argmax_w_high <= width - 1) {
+            __bang_mul_const(v2, v2, -1 * (argmax_w - argmax_w_low), channel_per_group_align);
+            __bang_add(nram_val, nram_val, v2, channel_per_group_align);
+        }
+        if (argmax_h_high <= height - 1 && argmax_w_low >= 0) {
+            __bang_mul_const(v3, v3, (argmax_w_low + 1 - argmax_w), channel_per_group_align);
+            __bang_add(nram_val, nram_val, v3, channel_per_group_align);
+        }
+        if (argmax_h_high <= height - 1 && argmax_w_high <= width - 1) {
+            __bang_mul_const(v4, v4, (argmax_w - argmax_w_low), channel_per_group_align);
+            __bang_add(nram_val, nram_val, v4, channel_per_group_align);
+        }
+    } else if (bp_dir == 1) {
+        if (argmax_h_low >= 0 && argmax_w_low >= 0) {
+            __memcpy_async(v1, im_data + (argmax_h_low * data_width + argmax_w_low) * channels,
+                channel_per_deformable_group * sizeof(T), GDRAM2NRAM);
+        }
+        if (argmax_h_low >= 0 && argmax_w_high <= width - 1) {
+            __memcpy_async(v2, im_data + (argmax_h_low * data_width + argmax_w_high) * channels,
+                channel_per_deformable_group * sizeof(T), GDRAM2NRAM);
+        }
+        if (argmax_h_high <= height - 1 && argmax_w_low >= 0) {
+            __memcpy_async(v3, im_data + (argmax_h_high * data_width + argmax_w_low) * channels,
+                channel_per_deformable_group * sizeof(T), GDRAM2NRAM);
+        }
+        if (argmax_h_high <= height - 1 && argmax_w_high <= width - 1) {
+            __memcpy_async(v4, im_data + (argmax_h_high * data_width + argmax_w_high) * channels,
+                channel_per_deformable_group * sizeof(T), GDRAM2NRAM);
+        }
+        __asm__ volatile("sync;");
+        if (argmax_h_low >= 0 && argmax_w_low >= 0) {
+            __bang_mul_const(v1, v1, -1 * (argmax_h_low + 1 - argmax_h), channel_per_group_align);
+            __bang_add(nram_val, nram_val, v1, channel_per_group_align);
+        }
+        if (argmax_h_low >= 0 && argmax_w_high <= width - 1) {
+            __bang_mul_const(v2, v2, (argmax_h_low + 1 - argmax_h), channel_per_group_align);
+            __bang_add(nram_val, nram_val, v2, channel_per_group_align);
+        }
+        if (argmax_h_high <= height - 1 && argmax_w_low >= 0) {
+            __bang_mul_const(v3, v3, -1 * (argmax_h - argmax_h_low), channel_per_group_align);
+            __bang_add(nram_val, nram_val, v3, channel_per_group_align);
+        }
+        if (argmax_h_high <= height - 1 && argmax_w_high <= width - 1) {
+            __bang_mul_const(v4, v4, (argmax_h - argmax_h_low), channel_per_group_align);
+            __bang_add(nram_val, nram_val, v4, channel_per_group_align);
+        }
+    }
+}
+
+namespace forward {
+
+template <typename T>
+__mlu_func__ void modulated_deformable_im2col_mlu_kernel(
         const int core_nums, const T *data_im, const T *data_offset, const T *data_mask,
         const int height, const int width, const int kernel_h, const int kernel_w,
         const int pad_h, const int pad_w, const int stride_h, const int stride_w,
@@ -72,11 +204,6 @@ __mlu_func__ void modulated_deformable_im2col_camb_block(
     const T *data_im_ptr = data_im;
     const uint32_t nfu_align_num = NFU_ALIGN_SIZE / sizeof(T);
     const uint32_t channel_per_group_align = CEIL_ALIGN(channel_per_deformable_group, nfu_align_num);
-    const uint32_t offset_batch_align = nfu_align_num;
-    T* nram_data_offset_h = (T*)nram_buffer;
-    T* nram_data_offset_w = nram_data_offset_h + offset_batch_align;
-    T* nram_data_mask = nram_data_offset_w + offset_batch_align;
-
     // batch_size must be 1
     for (int i = 0; i < kernel_h; ++i) {
         for (int j = 0; j < kernel_w; ++j) {
@@ -87,52 +214,33 @@ __mlu_func__ void modulated_deformable_im2col_camb_block(
                 const T *data_mask_ptr =
                     data_mask + deformable_group_index * kernel_num * hw_col;
 
-                for (uint32_t index_start = idx * offset_batch_align; index_start < hw_col; index_start += core_nums * offset_batch_align) {
-                    for(uint32_t n = 0; n < offset_batch_align; n++) {
-                        uint32_t index = index_start + n;
-                        if (index >= hw_col) {
-                            break;
-                        }
-                        const uint32_t h_col = index / width_col;
-                        const uint32_t w_col = index % width_col;
-                        const int h_in = h_col * stride_h - pad_h;
-                        const int w_in = w_col * stride_w - pad_w;
+                for (uint32_t index = idx; index < hw_col; index += core_nums) {
+                    const uint32_t h_col = index / width_col;
+                    const uint32_t w_col = index % width_col;
+                    const int h_in = h_col * stride_h - pad_h;
+                    const int w_in = w_col * stride_w - pad_w;
 
-                        T *data_col_ptr =
-                            data_col + (((i * kernel_w + j) * height_col) * width_col + index) * num_channels + c_im;
-                        const int data_offset_h_start =
-                            ((2 * (i * kernel_w + j)) * height_col) * width_col + index_start;
-                        const int data_offset_w_start =
-                            ((2 * (i * kernel_w + j) + 1) * height_col) * width_col + index_start;
-                        const int data_mask_hw_start =
-                            ((i * kernel_w + j) * height_col) * width_col + index_start;
+                    T *data_col_ptr = data_col + (((i * kernel_w + j) * height_col) * width_col + index) * num_channels + c_im;
+                    const int data_offset_h_ptr = ((2 * (i * kernel_w + j)) * height_col + h_col) * width_col + w_col;
+                    const int data_offset_w_ptr = ((2 * (i * kernel_w + j) + 1) * height_col + h_col) * width_col + w_col;
+                    const int data_mask_hw_ptr = ((i * kernel_w + j) * height_col + h_col) * width_col + w_col;
+                    const T offset_h = data_offset_ptr[data_offset_h_ptr];
+                    const T offset_w = data_offset_ptr[data_offset_w_ptr];
+                    const T mask = data_mask_ptr[data_mask_hw_ptr];
+                    
+                    const T h_im = h_in + i * dilation_h + offset_h;
+                    const T w_im = w_in + j * dilation_w + offset_w;
 
-                        if (n == 0) {
-                            __memcpy_async(nram_data_offset_h, data_offset_ptr + data_offset_h_start, offset_batch_align * sizeof(T), GDRAM2NRAM);
-                            __memcpy_async(nram_data_offset_w, data_offset_ptr + data_offset_w_start, offset_batch_align * sizeof(T), GDRAM2NRAM);
-                            __memcpy_async(nram_data_mask, data_mask_ptr + data_mask_hw_start, offset_batch_align * sizeof(T), GDRAM2NRAM);
-                            __asm__ volatile("sync;");
-                        }
-                        // const T offset_h = data_offset_ptr[data_offset_h_ptr];
-                        // const T offset_w = data_offset_ptr[data_offset_w_ptr];
-                        // const T mask = data_mask_ptr[data_mask_hw_ptr];
-                        const T offset_h = nram_data_offset_h[n];
-                        const T offset_w = nram_data_offset_w[n];
-                        const T mask = nram_data_mask[n];
-                        const T h_im = h_in + i * dilation_h + offset_h;
-                        const T w_im = w_in + j * dilation_w + offset_w;
-
-                        T* nram_val = (T*)nram_data_mask + offset_batch_align;
-                        T* nram_temp = nram_val + channel_per_group_align;
-                        __nramset(nram_val, channel_per_group_align, (T)0);
-                        if (h_im > -1 && w_im > -1 && h_im < height && w_im < width) {
-                            dmcn_im2col_bilinear(data_im_ptr, width, height, width, h_im, w_im, c_im, num_channels,
-                                                 nram_val, nram_temp, channel_per_group_align);
-                        }
-                        __bang_mul_const(nram_val, nram_val, mask, channel_per_group_align);
-                        __asm__ volatile("sync;");
-                        __memcpy_async(data_col_ptr, nram_val, channel_per_deformable_group * sizeof(T), NRAM2GDRAM);
+                    T* nram_val = (T*)nram_buffer;
+                    T* nram_temp = nram_val + channel_per_group_align;
+                    __nramset(nram_val, channel_per_group_align, (T)0);
+                    if (h_im > -1 && w_im > -1 && h_im < height && w_im < width) {
+                        dmcn_im2col_bilinear(data_im_ptr, width, height, width, h_im, w_im, c_im, num_channels,
+                                                nram_val, nram_temp, channel_per_deformable_group, channel_per_group_align);
                     }
+                    __bang_mul_const(nram_val, nram_val, mask, channel_per_group_align);
+                    __asm__ volatile("sync;");
+                    __memcpy_async(data_col_ptr, nram_val, channel_per_deformable_group * sizeof(T), NRAM2GDRAM);
                 }
             }
         }
@@ -140,7 +248,7 @@ __mlu_func__ void modulated_deformable_im2col_camb_block(
 }
 
 template <typename T>
-__mlu_global__ void modulated_deformable_im2col_camb_kernel(
+__mlu_global__ void modulated_deformable_im2col_mlu_entry(
         const int core_nums, const void *data_im, const void *data_offset, const T *data_mask,
         const int height, const int width, const int kernel_h, const int kernel_w,
         const int pad_h, const int pad_w, const int stride_h, const int stride_w,
@@ -148,7 +256,7 @@ __mlu_global__ void modulated_deformable_im2col_camb_kernel(
         const int channel_per_deformable_group, const int batch_size,
         const int num_channels, const int deformable_group, const int height_col,
         const int width_col, void *data_col) {
-    modulated_deformable_im2col_camb_block(
+    modulated_deformable_im2col_mlu_kernel(
         core_nums, (const T*)data_im, (const T*)data_offset, (const T*)data_mask,
         height, width, kernel_h, kernel_w,
         pad_h, pad_w, stride_h, stride_w,
@@ -160,6 +268,226 @@ __mlu_global__ void modulated_deformable_im2col_camb_kernel(
 }
 
 }  // namespace forward
+
+
+namespace backward {
+
+template <typename T>
+__mlu_func__ void modulated_deformable_col2im_mlu_kernel(
+        const int core_nums, const T* data_col, const T* data_offset, const T* data_mask,
+        const int batch_size, const int channels, const int height_im,
+        const int width_im, const int height_col, const int width_col,
+        const int kernel_h, const int kernel_w, const int pad_h, const int pad_w,
+        const int stride_h, const int stride_w, const int dilation_h,
+        const int dilation_w, const int deformable_group, T *grad_im) {
+    uint32_t idx = taskId;
+    const int hw_col = height_col * width_col;
+    if (idx >= hw_col) return;
+    const int kernel_num = kernel_h * kernel_w;
+    const int channel_per_deformable_group = channels / deformable_group;
+    const uint32_t nfu_align_num = NFU_ALIGN_SIZE / sizeof(T);
+    const uint32_t channel_per_group_align = CEIL_ALIGN(channel_per_deformable_group, nfu_align_num);
+    // batch_size must be 1
+    for (int i = 0; i < kernel_h; ++i) {
+        for (int j = 0; j < kernel_w; ++j) {
+            for (int deformable_group_index = 0; deformable_group_index < deformable_group; deformable_group_index++) {
+                int c_im = deformable_group_index * channel_per_deformable_group;
+                for (uint32_t index = idx; index < hw_col; index += core_nums)
+                {
+                    int w_out = index % width_col;
+                    int h_out = (index / width_col) % height_col;
+                    int w_in = w_out * stride_w - pad_w;
+                    int h_in = h_out * stride_h - pad_h;
+                    const T *data_offset_ptr = data_offset + deformable_group_index * 2 * kernel_num * hw_col;
+                    const T *data_mask_ptr = data_mask + deformable_group_index * kernel_num * hw_col;
+                    
+                    const int data_offset_h_ptr = ((2 * (i * kernel_w + j)) * height_col + h_out) * width_col + w_out;
+                    const int data_offset_w_ptr = ((2 * (i * kernel_w + j) + 1) * height_col + h_out) * width_col + w_out;
+                    const int data_mask_hw_ptr = ((i * kernel_w + j) * height_col + h_out) * width_col + w_out;
+                    const T offset_h = data_offset_ptr[data_offset_h_ptr];
+                    const T offset_w = data_offset_ptr[data_offset_w_ptr];
+                    const T mask = data_mask_ptr[data_mask_hw_ptr];
+
+                    const T cur_inv_h_data = h_in + i * dilation_h + offset_h;
+                    const T cur_inv_w_data = w_in + j * dilation_w + offset_w;
+
+                    T* nram_data_col = (T*)nram_buffer;
+                    T* nram_cur_top_grad = nram_data_col + channel_per_group_align;
+                    const int data_col_start = ((i * kernel_w + j) * hw_col + index) * channels + c_im;
+                    __memcpy_async(nram_data_col, data_col + data_col_start, channel_per_deformable_group * sizeof(T), GDRAM2NRAM);
+                    __asm__ volatile("sync;");
+                    __bang_mul_const(nram_cur_top_grad, nram_data_col, mask, channel_per_group_align);
+                    // const T cur_top_grad = data_col[index] * mask;
+                    const int cur_h = (int)cur_inv_h_data;
+                    const int cur_w = (int)cur_inv_w_data;
+                    for (int dy = -2; dy <= 2; dy++) {
+                        for (int dx = -2; dx <= 2; dx++) {
+                            if (cur_h + dy >= 0 && cur_h + dy < height_im && cur_w + dx >= 0 &&
+                                    cur_w + dx < width_im && abs(cur_inv_h_data - (cur_h + dy)) < 1 &&
+                                    abs(cur_inv_w_data - (cur_w + dx)) < 1) {
+                                int cur_bottom_grad_pos = ((cur_h + dy) * width_im + cur_w + dx) * channels + c_im;
+                                T weight = dmcn_get_gradient_weight(cur_inv_h_data,
+                                                                    cur_inv_w_data, cur_h + dy,
+                                                                    cur_w + dx, height_im, width_im);
+                                T* nram_cur_top_grad_weight = nram_cur_top_grad + channel_per_group_align;
+                                T* nram_gram_im = nram_cur_top_grad_weight + channel_per_group_align;
+                                __bang_mul_const(nram_cur_top_grad_weight, nram_cur_top_grad, weight, channel_per_group_align);
+                                __bang_atomic_add(nram_gram_im, grad_im + cur_bottom_grad_pos,
+                                    nram_cur_top_grad_weight, channel_per_deformable_group);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+template <typename T>
+__mlu_global__ void modulated_deformable_col2im_mlu_entry(
+        const int core_nums, const void* data_col, const void* data_offset, const void* data_mask,
+        const int batch_size, const int channels, const int height_im,
+        const int width_im, const int height_col, const int width_col,
+        const int kernel_h, const int kernel_w, const int pad_h, const int pad_w,
+        const int stride_h, const int stride_w, const int dilation_h,
+        const int dilation_w, const int deformable_group, void *grad_im) {
+    modulated_deformable_col2im_mlu_kernel(
+        core_nums, (const T*)data_col, (const T*)data_offset, (const T*)data_mask,
+        batch_size, channels, height_im,
+        width_im, height_col, width_col,
+        kernel_h, kernel_w, pad_h, pad_w,
+        stride_h, stride_w, dilation_h,
+        dilation_w, deformable_group, (T*)grad_im);
+}
+
+
+template <typename T>
+__mlu_func__ void modulated_deformable_col2im_coord_mlu_kernel(
+        const int core_nums, const T *data_col, const T *data_im, const T *data_offset,
+        const T *data_mask, const int batch_size, const int channels,
+        const int height_im, const int width_im, const int height_col,
+        const int width_col, const int kernel_h, const int kernel_w,
+        const int pad_h, const int pad_w, const int stride_h, const int stride_w,
+        const int dilation_h, const int dilation_w, const int deformable_group,
+        T *grad_offset, T *grad_mask) {
+    uint32_t idx = taskId;
+    const int hw_col = height_col * width_col;
+    if (idx >= hw_col) return;
+
+    const int kernel_num = kernel_h * kernel_w;
+    const int channel_per_deformable_group = channels / deformable_group;
+    const uint32_t nfu_align_num = NFU_ALIGN_SIZE / sizeof(T);
+    const uint32_t channel_per_group_align = CEIL_ALIGN(channel_per_deformable_group, nfu_align_num);
+
+    // batch_size must be 1
+    for (int deformable_group_index = 0; deformable_group_index < deformable_group; ++deformable_group_index) {
+        for (int k = 0; k < kernel_num * 2; ++k) {
+            for (uint32_t index = idx; index < hw_col; index += core_nums) {
+                T val = 0, mval = 0;
+                int w = index % width_col;
+                int h = (index / width_col) % height_col;
+                int c = deformable_group_index * kernel_num * 2 + k;
+
+                // compute the start and end of the output
+                // int cnt = 0;
+                const T *data_col_ptr = data_col + deformable_group_index * channel_per_deformable_group;
+                const T *data_im_ptr = data_im + deformable_group_index * channel_per_deformable_group;
+                const T *data_offset_ptr = data_offset + (deformable_group_index) * 2 * kernel_num * hw_col;
+                const T *data_mask_ptr = data_mask + (deformable_group_index) * kernel_num * hw_col;
+
+                const int offset_c = k;
+                int j = (offset_c / 2) % kernel_w;
+                int i = (offset_c / 2 / kernel_w) % kernel_h;
+                int w_out = w;
+                int h_out = h;
+                int w_in = w_out * stride_w - pad_w;
+                int h_in = h_out * stride_h - pad_h;
+                const int bp_dir = offset_c % 2;
+                const int data_offset_h_ptr = (((2 * (i * kernel_w + j)) * height_col + h_out) * width_col + w_out);
+                const int data_offset_w_ptr = (((2 * (i * kernel_w + j) + 1) * height_col + h_out) * width_col + w_out);
+                const int data_mask_hw_ptr = (((i * kernel_w + j) * height_col + h_out) * width_col + w_out);
+                const T offset_h = data_offset_ptr[data_offset_h_ptr];
+                const T offset_w = data_offset_ptr[data_offset_w_ptr];
+                const T mask = data_mask_ptr[data_mask_hw_ptr];
+                T inv_h = h_in + i * dilation_h + offset_h;
+                T inv_w = w_in + j * dilation_w + offset_w;
+
+                T* nram_data_col = (T*)nram_buffer;
+                T* nram_mval = nram_data_col + channel_per_group_align;
+                T* nram_val = nram_mval + channel_per_group_align;
+                T* nram_temp = nram_val + channel_per_group_align;
+                T* nram_sum = nram_temp + channel_per_group_align;
+
+                __nramset(nram_data_col, channel_per_group_align, (T)0);
+                __nramset(nram_val, channel_per_group_align, (T)0);
+                __nramset(nram_mval, channel_per_group_align, (T)0);
+
+
+                const int col_pos_start = ((((offset_c / 2) * height_col) + h) * width_col + w) * channels;
+                if (inv_h <= -1 || inv_w <= -1 || inv_h >= height_im || inv_w >= width_im) {
+                    inv_h = inv_w = -2;
+                } else {
+                    __memcpy_async(nram_data_col, data_col_ptr + col_pos_start, channel_per_deformable_group * sizeof(T), GDRAM2NRAM);
+                    dmcn_im2col_bilinear(data_im_ptr, width_im, height_im, width_im, inv_h, inv_w, 0, channels,
+                        nram_mval, nram_temp, channel_per_deformable_group, channel_per_group_align);
+                    __asm__ volatile("sync;");
+                    __bang_mul(nram_mval, nram_data_col, nram_mval, channel_per_group_align);
+                    __bang_reduce_sum(nram_sum, nram_mval, channel_per_group_align);
+                    __asm__ volatile("sync;");
+                    for (int num = 0; num < channel_per_group_align; num += nfu_align_num) {
+                        mval += nram_sum[num];
+                    }
+                    // for (int num = 0; num < channel_per_group_align; num++) {
+                    //     mval += nram_mval[num];
+                    // }
+                }
+
+                dmcn_get_coordinate_weight(inv_h, inv_w, height_im, width_im, data_im_ptr, width_im, channels, bp_dir,
+                                            nram_val, nram_temp, channel_per_deformable_group, channel_per_group_align);
+                __asm__ volatile("sync;");
+                __bang_mul(nram_val, nram_data_col, nram_val, channel_per_group_align);
+                __bang_mul_const(nram_val, nram_val, mask, channel_per_group_align);
+                __bang_reduce_sum(nram_sum, nram_val, channel_per_group_align);
+                __asm__ volatile("sync;");
+                for (int num = 0; num < channel_per_group_align; num += nfu_align_num) {
+                    val += nram_sum[num];
+                }
+                // for (int num = 0; num < channel_per_group_align; num++) {
+                //     val += nram_val[num];
+                // }
+
+                int grad_offset_index = (deformable_group_index * kernel_num * 2 + k) * hw_col + index;
+                // KERNEL_ASSIGN(grad_offset[grad_offset_index], offset_req, val);
+                grad_offset[grad_offset_index] = val;
+                if (offset_c % 2 == 0) {
+                    grad_mask[((deformable_group_index * kernel_h * kernel_w + offset_c / 2) * height_col + h) * width_col + w] = mval;
+                }
+            }
+        }
+    }
+}
+
+template <typename T>
+__mlu_global__ void modulated_deformable_col2im_coord_mlu_entry(
+        const int core_nums, const void *data_col, const void *data_im, const void *data_offset,
+        const void *data_mask, const int batch_size, const int channels,
+        const int height_im, const int width_im, const int height_col,
+        const int width_col, const int kernel_h, const int kernel_w,
+        const int pad_h, const int pad_w, const int stride_h, const int stride_w,
+        const int dilation_h, const int dilation_w, const int deformable_group,
+        void *grad_offset, void *grad_mask) {
+    modulated_deformable_col2im_coord_mlu_kernel(
+        core_nums, (const T*)data_col, (const T*)data_im, (const T*)data_offset,
+        (const T*)data_mask, batch_size, channels,
+        height_im, width_im, height_col,
+        width_col, kernel_h, kernel_w,
+        pad_h, pad_w, stride_h, stride_w,
+        dilation_h, dilation_w, deformable_group,
+        (T*)grad_offset, (T*)grad_mask);
+}
+
+}  // namespace backward
+
 
 void modulated_deformable_im2col_camb(
         cnrtDim3_t k_dim, cnrtFunctionType_t k_type, cnrtQueue_t queue, const cnrtDataType_t d_type,
@@ -173,10 +501,10 @@ void modulated_deformable_im2col_camb(
     const int channel_per_deformable_group = channels / deformable_group;
     const int core_nums = k_dim.x * k_dim.y * k_dim.z;
     if (batch_size != 1) {
-        printf("batch_size must be 1\n");
+        std::runtime_error("batch_size must be 1");
     }
     if (d_type == CNRT_FLOAT16) {
-        forward::modulated_deformable_im2col_camb_kernel<
+        forward::modulated_deformable_im2col_mlu_entry<
             half><<<k_dim, k_type, queue>>>(core_nums, (const half*)data_im, (const half*)data_offset, (const half*)data_mask,
                                             height_im, width_im, kernel_h, kernel_w,
                                             pad_h, pad_w, stride_h, stride_w,
@@ -185,7 +513,7 @@ void modulated_deformable_im2col_camb(
                                             channels, deformable_group, height_col,
                                             width_col, (half*)data_col);
     } else {
-        forward::modulated_deformable_im2col_camb_kernel<
+        forward::modulated_deformable_im2col_mlu_entry<
             float><<<k_dim, k_type, queue>>>(core_nums, (const float*)data_im, (const float*)data_offset, (const float*)data_mask,
                                             height_im, width_im, kernel_h, kernel_w,
                                             pad_h, pad_w, stride_h, stride_w,
@@ -193,5 +521,73 @@ void modulated_deformable_im2col_camb(
                                             channel_per_deformable_group, batch_size,
                                             channels, deformable_group, height_col,
                                             width_col, (float*)data_col);
+    }
+}
+
+
+void modulated_deformable_col2im_camb(
+        cnrtDim3_t k_dim, cnrtFunctionType_t k_type, cnrtQueue_t queue, const cnrtDataType_t d_type,
+        const void* data_col, const void* data_offset, const void* data_mask,
+        const int batch_size, const int channels, const int height_im,
+        const int width_im, const int height_col, const int width_col,
+        const int kernel_h, const int kernel_w, const int pad_h, const int pad_w,
+        const int stride_h, const int stride_w, const int dilation_h,
+        const int dilation_w, const int deformable_group, void *grad_im) {
+    const int channel_per_deformable_group = channels / deformable_group;
+    const int core_nums = k_dim.x * k_dim.y * k_dim.z;
+    if (batch_size != 1) {
+        std::runtime_error("batch_size must be 1");
+    }
+    if (d_type == CNRT_FLOAT16) {
+        backward::modulated_deformable_col2im_mlu_entry<
+            half><<<k_dim, k_type, queue>>>(core_nums, data_col, data_offset, data_mask,
+                                            batch_size, channels, height_im,
+                                            width_im, height_col, width_col,
+                                            kernel_h, kernel_w, pad_h, pad_w,
+                                            stride_h, stride_w, dilation_h,
+                                            dilation_w, deformable_group, grad_im);
+    } else {
+        backward::modulated_deformable_col2im_mlu_entry<
+            float><<<k_dim, k_type, queue>>>(core_nums, data_col, data_offset, data_mask,
+                                             batch_size, channels, height_im,
+                                             width_im, height_col, width_col,
+                                             kernel_h, kernel_w, pad_h, pad_w,
+                                             stride_h, stride_w, dilation_h,
+                                             dilation_w, deformable_group, grad_im);
+    }
+}
+
+void modulated_deformable_col2im_coord_camb(
+        cnrtDim3_t k_dim, cnrtFunctionType_t k_type, cnrtQueue_t queue, const cnrtDataType_t d_type,
+        const void *data_col, const void *data_im, const void *data_offset,
+        const void *data_mask, const int batch_size, const int channels,
+        const int height_im, const int width_im, const int height_col,
+        const int width_col, const int kernel_h, const int kernel_w,
+        const int pad_h, const int pad_w, const int stride_h, const int stride_w,
+        const int dilation_h, const int dilation_w, const int deformable_group,
+        void *grad_offset, void *grad_mask) {
+    const int channel_per_deformable_group = channels / deformable_group;
+    const int core_nums = k_dim.x * k_dim.y * k_dim.z;
+    if (batch_size != 1) {
+        std::runtime_error("batch_size must be 1");
+    }
+    if (d_type == CNRT_FLOAT16) {
+        backward::modulated_deformable_col2im_coord_mlu_entry<
+            half><<<k_dim, k_type, queue>>>(core_nums, data_col, data_im, data_offset,
+                                            data_mask, batch_size, channels,
+                                            height_im, width_im, height_col,
+                                            width_col, kernel_h, kernel_w,
+                                            pad_h, pad_w, stride_h, stride_w,
+                                            dilation_h, dilation_w, deformable_group,
+                                            grad_offset, grad_mask);
+    } else {
+        backward::modulated_deformable_col2im_coord_mlu_entry<
+            float><<<k_dim, k_type, queue>>>(core_nums, data_col, data_im, data_offset,
+                                             data_mask, batch_size, channels,
+                                             height_im, width_im, height_col,
+                                             width_col, kernel_h, kernel_w,
+                                             pad_h, pad_w, stride_h, stride_w,
+                                             dilation_h, dilation_w, deformable_group,
+                                             grad_offset, grad_mask);
     }
 }

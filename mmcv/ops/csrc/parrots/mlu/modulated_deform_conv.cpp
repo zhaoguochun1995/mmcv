@@ -171,8 +171,8 @@ void modulated_deform_conv_backward(
                             weight.size(2), weight.size(3)});
 
         for (int g = 0; g < group; g++) {
-        columns[g].addmm_(weight[g].flatten(1).transpose(0, 1),
-                            grad_output[b][g].flatten(1), 0.0f, 1.0f);
+            columns[g].addmm_(weight[g].flatten(1).transpose(0, 1),
+                                grad_output[b][g].flatten(1), 0.0f, 1.0f);
         }
 
         columns =
