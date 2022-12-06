@@ -140,7 +140,7 @@ def auto_fp16(
                     else:
                         new_kwargs[arg_name] = arg_value
             # apply converted arguments to the decorated method
-            if (TORCH_VERSION != 'parrots' and
+            if (TORCH_VERSION == 'parrots' or
                     digit_version(TORCH_VERSION) >= digit_version('1.6.0')):
                 with autocast(enabled=True):
                     output = old_func(*new_args, **new_kwargs)
