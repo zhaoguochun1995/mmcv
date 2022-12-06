@@ -110,8 +110,7 @@ void NMSMLUKernelLauncher(CambContext& ctx, const DArrayLite& boxes,
   int output_num = 0;
   PARROTS_CALLCNRT(cnrtMemcpyAsync(&output_num, output_size.data(), sizeof(int),
                                    queue, cnrtMemcpyDevToHost));
-
-  PARROTS_CALLCNRT(cnrtSyncQueue(queue));
+  ctx.getStream().synchronize();
   DArrayLite output32 = ctx.createDArrayLite(boxes.spec()
                                     .withElemType(Prim::Int32)
                                     .withShape(DArrayShape(output_num)));
