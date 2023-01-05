@@ -18,14 +18,32 @@
 using namespace parrots;
 
 void modulated_deformable_im2col_camb(
-    cnrtDim3_t k_dim, cnrtFunctionType_t k_type, cnrtQueue_t queue, const cnrtDataType_t d_type,
-    const void* data_im, const void* data_offset, const void* data_mask,
-    const int batch_size, const int channels, const int height_im,
-    const int width_im, const int height_col, const int width_col,
-    const int kernel_h, const int kernel_w, const int pad_h, const int pad_w,
-    const int stride_h, const int stride_w, const int dilation_h,
-    const int dilation_w, const int deformable_group, void* data_col);
+        cnrtDim3_t k_dim, cnrtFunctionType_t k_type, cnrtQueue_t queue, const cnrtDataType_t d_type,
+        const void* data_im, const void* data_offset, const void* data_mask,
+        const int batch_size, const int channels, const int height_im,
+        const int width_im, const int height_col, const int width_col,
+        const int kernel_h, const int kernel_w, const int pad_h, const int pad_w,
+        const int stride_h, const int stride_w, const int dilation_h,
+        const int dilation_w, const int deformable_group, void* data_col);
 
+void modulated_deformable_col2im_camb(
+        cnrtDim3_t k_dim, cnrtFunctionType_t k_type, cnrtQueue_t queue, const cnrtDataType_t d_type,
+        const void* data_col, const void* data_offset, const void* data_mask,
+        const int batch_size, const int channels, const int height_im,
+        const int width_im, const int height_col, const int width_col,
+        const int kernel_h, const int kernel_w, const int pad_h, const int pad_w,
+        const int stride_h, const int stride_w, const int dilation_h,
+        const int dilation_w, const int deformable_group, void *grad_im);
+
+void modulated_deformable_col2im_coord_camb(
+        cnrtDim3_t k_dim, cnrtFunctionType_t k_type, cnrtQueue_t queue, const cnrtDataType_t d_type,
+        const void *data_col, const void *data_im, const void *data_offset,
+        const void *data_mask, const int batch_size, const int channels,
+        const int height_im, const int width_im, const int height_col,
+        const int width_col, const int kernel_h, const int kernel_w,
+        const int pad_h, const int pad_w, const int stride_h, const int stride_w,
+        const int dilation_h, const int dilation_w, const int deformable_group,
+        void *grad_offset, void *grad_mask);
 
 void modulated_deform_conv_forward_cpu_parrots(
         HostContext& ctx, const SSElement& attr, const OperatorBase::in_list_t& ins,
@@ -262,23 +280,17 @@ void modulated_deform_conv_forward_camb_parrots(
         output = output.view({output.dim(0), group, output.dim(1) / group,
                                 output.dim(2), output.dim(3)});
 
+        DArrayLite input_nhwc = ctx.createDArrayLite(input.spec().duplicate(parrots::MemoryFormat::ChannelsLast));
+        cambTransposeTo(ctx, input, input_nhwc, CNNL_LAYOUT_NCHW, CNNL_LAYOUT_NHWC);
+        columns = columns.view({1, channels, kernel_h * kernel_w, height_out * width_out});
+        DArrayLite columns_nhwc = ctx.createDArrayLite(columns.spec().duplicate(parrots::MemoryFormat::ChannelsLast));
         for (int b = 0; b < batch; b++) {
-            const int num_kernels = channels * 1 * height_out * width_out;
             cnrtDim3_t k_dim = {getDeviceAttr(cnrtAttrMcorePerCluster), getDeviceAttr(cnrtAttrClusterCount), 1};
             cnrtFunctionType_t k_type = CNRT_FUNC_TYPE_UNION1;
             auto queue = ctx.getStream().native();
             cnrtDataType_t d_type = getCnrtDataType(input.elemType());
 
             // launch kernel
-            DArrayLite input_nhwc = ctx.createDArrayLite(input.spec().duplicate(parrots::MemoryFormat::ChannelsLast));
-            cambTransposeTo(ctx, input, input_nhwc, CNNL_LAYOUT_NCHW, CNNL_LAYOUT_NHWC);
-            DArrayLite offset_nhwc = ctx.createDArrayLite(offset.spec().duplicate(parrots::MemoryFormat::ChannelsLast));
-            cambTransposeTo(ctx, offset, offset_nhwc, CNNL_LAYOUT_NCHW, CNNL_LAYOUT_NHWC);
-            DArrayLite mask_nhwc = ctx.createDArrayLite(mask.spec().duplicate(parrots::MemoryFormat::ChannelsLast));
-            cambTransposeTo(ctx, mask, mask_nhwc, CNNL_LAYOUT_NCHW, CNNL_LAYOUT_NHWC);
-            columns = columns.view({1, channels, kernel_h * kernel_w, height_out * width_out});
-            DArrayLite columns_nhwc = ctx.createDArrayLite(columns.spec().duplicate(parrots::MemoryFormat::ChannelsLast));
-
             modulated_deformable_im2col_camb(
                 k_dim, k_type, queue, d_type,
                 input_nhwc[b].data(), offset[b].data(), mask[b].data(),
@@ -367,16 +379,117 @@ void modulated_deform_conv_backward_camb_parrots(
         AT_ERROR("Input shape and kernel channels won't match: (%d vs %d).",
                 channels, channels_kernel * group);
 
-    const int height_out =
-        (height + 2 * pad_h - (dilation_h * (kernel_h - 1) + 1)) / stride_h + 1;
-    const int width_out =
-        (width + 2 * pad_w - (dilation_w * (kernel_w - 1) + 1)) / stride_w + 1;
-    PARROTS_NOTSUPPORTED << "modulated_deform_conv_backward";
-    // modulated_deform_conv_backward(
-    //     input, weight, bias, ones, offset, mask, columns, grad_input, grad_weight,
-    //     grad_bias, grad_offset, grad_mask, grad_output, kernel_h, kernel_w,
-    //     stride_h, stride_w, pad_h, pad_w, dilation_h, dilation_w, group,
-    //     deformable_group, with_bias);
+    const int height_out = (height + 2 * pad_h - (dilation_h * (kernel_h - 1) + 1)) / stride_h + 1;
+    const int width_out = (width + 2 * pad_w - (dilation_w * (kernel_w - 1) + 1)) / stride_w + 1;
+
+    if (ones.ndims() != 2 || ones.dim(0) * ones.dim(1) < height_out * width_out) {
+        // Resize plane and fill with ones...
+        ones = ctx.createDArrayLite(input.elemType(), DArrayShape(height_out, width_out));
+        fill(ctx, ones, 1);
+    }
+    grad_input = grad_input.view({batch, channels, height, width});
+    columns = ctx.createDArrayLite(input.elemType(),
+                                   DArrayShape(channels * kernel_h * kernel_w, height_out * width_out));
+    fill(ctx, columns, 0);
+    grad_output = grad_output.view({grad_output.dim(0), group, grad_output.dim(1) / group,
+                            grad_output.dim(2), grad_output.dim(3)});
+    DArrayLite input_nhwc = ctx.createDArrayLite(input.spec().duplicate(parrots::MemoryFormat::ChannelsLast));
+    cambTransposeTo(ctx, input, input_nhwc, CNNL_LAYOUT_NCHW, CNNL_LAYOUT_NHWC);
+
+    DArrayLite grad_input_nhwc = ctx.createDArrayLite(grad_input.spec().duplicate(parrots::MemoryFormat::ChannelsLast));
+    cambTransposeTo(ctx, grad_input, grad_input_nhwc, CNNL_LAYOUT_NCHW, CNNL_LAYOUT_NHWC);
+
+    for (int b = 0; b < batch; b++) {
+        cnrtDim3_t k_dim = {getDeviceAttr(cnrtAttrMcorePerCluster), getDeviceAttr(cnrtAttrClusterCount), 1};
+        cnrtFunctionType_t k_type = CNRT_FUNC_TYPE_UNION1;
+        auto queue = ctx.getStream().native();
+        cnrtDataType_t d_type = getCnrtDataType(input.elemType());
+        // divide int group
+        columns = columns.view({group, columns.dim(0) / group, columns.dim(1)});
+        weight = weight.view({group, weight.dim(0) / group, weight.dim(1),
+                            weight.dim(2), weight.dim(3)});
+        for (int g = 0; g < group; g++) {
+            DArrayLite weightG = weight[g].view({weight[g].dim(0), weight[g].size() / weight[g].dim(0)});
+            weightG = transpose(ctx, weightG, 0, 1);
+            DArrayLite grad_outputBG = grad_output[b][g].view({grad_output[b][g].dim(0),
+                                                               grad_output[b][g].size() / grad_output[b][g].dim(0)});
+            gemm(ctx, 1.0, false, weightG, false, grad_outputBG, 0.0, columns[g]);
+        }
+
+        columns = columns.view({columns.dim(0) * columns.dim(1), columns.dim(2)});
+        weight = weight.view({weight.dim(0) * weight.dim(1), weight.dim(2), weight.dim(3), weight.dim(4)});
+
+        DArrayLite columns_nchw = columns.view({1, channels, kernel_h * kernel_w, height_out * width_out});
+        DArrayLite columns_nhwc = ctx.createDArrayLite(columns_nchw.spec().duplicate(parrots::MemoryFormat::ChannelsLast));
+        cambTransposeTo(ctx, columns_nchw, columns_nhwc, CNNL_LAYOUT_NCHW, CNNL_LAYOUT_NHWC);
+
+        // gradient w.r.t. input coordinate data
+        modulated_deformable_col2im_coord_camb(
+            k_dim, k_type, queue, d_type,
+            columns_nhwc.data(), input_nhwc[b].data(), offset[b].data(), mask[b].data(),
+            1, channels, height, width,
+            height_out, width_out, kernel_h, kernel_w, pad_h, pad_w, stride_h,
+            stride_w, dilation_h, dilation_w, deformable_group, grad_offset[b].data(),
+            grad_mask[b].data());
+
+        // gradient w.r.t. input data
+        modulated_deformable_col2im_camb(
+            k_dim, k_type, queue, d_type,
+            columns_nhwc.data(), offset[b].data(), mask[b].data(),
+            1, channels, height, width, height_out,
+            width_out, kernel_h, kernel_w, pad_h, pad_w, stride_h, stride_w,
+            dilation_h, dilation_w, deformable_group, grad_input_nhwc[b].data());
+
+        // gradient w.r.t. weight, dWeight should accumulate across the batch and
+        // group
+        modulated_deformable_im2col_camb(
+            k_dim, k_type, queue, d_type,
+            input_nhwc[b].data(), offset[b].data(), mask[b].data(),
+            1, channels, height, width, height_out,
+            width_out, kernel_h, kernel_w, pad_h, pad_w, stride_h, stride_w,
+            dilation_h, dilation_w, deformable_group, columns_nhwc.data());
+        cambTransposeTo(ctx, columns_nhwc, columns_nchw, CNNL_LAYOUT_NHWC, CNNL_LAYOUT_NCHW);
+
+        columns = columns_nchw.view({group, columns.dim(0) / group, columns.dim(1)});
+        grad_weight = grad_weight.view({group, grad_weight.dim(0) / group,
+                                        grad_weight.dim(1), grad_weight.dim(2),
+                                        grad_weight.dim(3)});
+        if (with_bias) {
+            grad_bias = grad_bias.view({group, grad_bias.dim(0) / group});
+        }
+
+        for (int g = 0; g < group; g++) {
+            DArrayLite grad_outputBG = grad_output[b][g].view({grad_output[b][g].dim(0),
+                                                            grad_output[b][g].size() / grad_output[b][g].dim(0)});
+            DArrayLite columnsG = transpose(ctx, columns[g], 0, 1);
+            DArrayLite matOut = ctx.createDArrayLite(input.elemType(), DArrayShape(grad_outputBG.dim(0), columnsG.dim(1)));
+            fill(ctx, matOut, 0);
+            gemm(ctx, 1.0, false, grad_outputBG, false, columnsG, 0.0, matOut);
+            DArrayLite grad_weightG = grad_weight[g].view({grad_weight[g].dim(0), grad_weight[g].size() / grad_weight[g].dim(0)});
+            add(ctx, grad_weightG, matOut, grad_weightG);
+            if (with_bias) {
+                DArrayLite grad_weightG = grad_bias[g].view({grad_bias[g].size(), 1});
+                ones = ones.view({ones.size(), 1});
+                DArrayLite matOut = ctx.createDArrayLite(input.elemType(), DArrayShape(grad_outputBG.dim(0), ones.dim(1)));
+                fill(ctx, matOut, 0);
+                gemm(ctx, 1.0, false, grad_outputBG, false, ones, 0.0, matOut);
+                add(ctx, grad_weightG, matOut, grad_weightG);
+            }
+        }
+
+        columns = columns.view({columns.dim(0) * columns.dim(1), columns.dim(2)});
+        grad_weight = grad_weight.view({grad_weight.dim(0) * grad_weight.dim(1),
+                                        grad_weight.dim(2), grad_weight.dim(3),
+                                        grad_weight.dim(4)});
+        if (with_bias) {
+            grad_bias = grad_bias.view({grad_bias.dim(0) * grad_bias.dim(1)});
+        }
+    }
+    cambTransposeTo(ctx, grad_input_nhwc, grad_input, CNNL_LAYOUT_NHWC, CNNL_LAYOUT_NCHW);
+
+    grad_output = grad_output.view({grad_output.dim(0) * grad_output.dim(1),
+                            grad_output.dim(2), grad_output.dim(3),
+                            grad_output.dim(4)});
 }
 
 #endif  // PARROTS_USE_CAMB
